@@ -1,5 +1,11 @@
 import socket, numpy as np, whisper, queue, threading, time, gc
 
+# achtung: für whisper muss man auch cuda installieren 
+# achtung 2 electric boogalo: whisper installieren hat bei mir paar std gedauert, zeit einplanen 
+
+#TODO: tune whisper parameters, audio buffering 
+#TODO: build ros node wrapper 
+
 model = whisper.load_model("tiny")
 SAMPLE_RATE = 16000
 audio_queue = queue.Queue()
