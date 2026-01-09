@@ -27,7 +27,8 @@ setup(
             'move_straight = meeseeks.move_straight:main',
             'move_straight2 = meeseeks.move_straight2:main',
             'five_star = meeseeks.five_star:main',
-            'five_star2 = meeseeks.five_star2:main'
+            'five_star2 = meeseeks.five_star2:main',
+            'target_selected_gesture = meeseeks.target_selected_gesture:main',
         ],
     },
 )
