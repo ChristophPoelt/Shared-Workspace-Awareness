@@ -1,20 +1,19 @@
-# Virtual environment (never commit!)
-.venv/
-venv/
-env/
-
-# Python bytecode and caches
+# Bytecode caches
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
 
-# Dependencies (use requirements.txt instead)
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Dependency locks
 Pipfile.lock
 poetry.lock
 
-# IDE/editor files
+# IDE files
 .vscode/
 .idea/
 *.swp
