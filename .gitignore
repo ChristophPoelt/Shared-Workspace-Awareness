@@ -1,0 +1,21 @@
+# Virtual environment (never commit!)
+.venv/
+venv/
+env/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Dependencies (use requirements.txt instead)
+Pipfile.lock
+poetry.lock
+
+# IDE/editor files
+.vscode/
+.idea/
+*.swp
+*.swo
