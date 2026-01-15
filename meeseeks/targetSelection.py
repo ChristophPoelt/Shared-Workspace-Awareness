@@ -1,19 +1,28 @@
 import random
+from globalVariables import currentTargetGlobal #not sure this line is necessary
 
 TARGETS = ["position0", "position1", "position2"]
 
-
-def selectNewTarget(currentTarget: str) -> str:
+def selectNewTarget(currentTarget: str | None) -> str:
     """
     Select a random target different from the current one.
-    Returns a String with the position name
+    If currentTarget is None, select any target.
+    Also updates the global variable currentTargetGlobal.
     """
-    if currentTarget not in TARGETS:
-        raise ValueError(f"Unknown current target: {currentTarget}")
+    if currentTarget is None:
+        new_target = random.choice(TARGETS)
+    else:
+        if currentTarget not in TARGETS:
+            raise ValueError(f"Unknown current target: {currentTarget}")
+        available_targets = [t for t in TARGETS if t != currentTarget]
+        new_target = random.choice(available_targets)
 
-    #creates a list with all targets in t except the current one
-    available_targets = [t for t in TARGETS if t != currentTarget]
-    return random.choice(available_targets)
+    # Update the global variable in another module
+    currentTargetGlobal = new_target
+
+    return new_target
+
+
 
 
 #example usage
