@@ -28,7 +28,8 @@ setup(
             'move_straight2 = meeseeks.move_straight2:main',
             'five_star = meeseeks.five_star:main',
             'five_star2 = meeseeks.five_star2:main',
-            'target_selected_gesture = meeseeks.target_selected_gesture:main',
+            'target_selected_gesture = meeseeks.rtarget_selected_gesture:main',
+            'robot_gestures = meeseeks.robot_gestures:main',
         ],
     },
 )
