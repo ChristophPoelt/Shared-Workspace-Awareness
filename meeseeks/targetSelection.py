@@ -1,5 +1,7 @@
 import random
-from globalVariables import currentTargetGlobal #not sure this line is necessary
+# from globalVariables import currentTargetGlobal #not sure this line is necessary
+# Shiyi: sorry franzi, ich brauch diese Import zu ändern, sonder wird Lauch ein Crash bekommen.
+from . import globalVariables as gv
 
 TARGETS = ["position0", "position1", "position2"]
 
@@ -18,7 +20,7 @@ def selectNewTarget(currentTarget: str | None) -> str:
         new_target = random.choice(available_targets)
 
     # Update the global variable in another module
-    currentTargetGlobal = new_target
+    gv.currentTargetGlobal = new_target
 
     return new_target
 
