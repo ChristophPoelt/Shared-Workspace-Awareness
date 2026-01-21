@@ -1,5 +1,8 @@
 from setuptools import find_packages, setup
 
+import os
+from glob import glob
+
 package_name = 'meeseeks'
 
 setup(
@@ -7,9 +10,9 @@ setup(
     version='0.0.0',
     packages=find_packages(exclude=['test']),
     data_files=[
-        ('share/ament_index/resource_index/packages',
-            ['resource/' + package_name]),
-        ('share/' + package_name, ['package.xml']),
+        ("share/ament_index/resource_index/packages", ["resource/meeseeks"]),
+        ("share/meeseeks", ["package.xml"]),
+        (os.path.join("share", "meeseeks", "launch"), glob("launch/*.launch.py")),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -30,6 +33,7 @@ setup(
             'five_star2 = meeseeks.five_star2:main',
             'target_selected_gesture = meeseeks.rtarget_selected_gesture:main',
             'robot_gestures = meeseeks.robot_gestures:main',
+            'main_logic = meeseeks.main_logic:main',
         ],
     },
 )
