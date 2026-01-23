@@ -8,7 +8,7 @@ from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 from meeseeks.targetSelection import selectNewTarget
-from meeseeks.globalVariables import currentTargetGlobal
+import meeseeks.globalVariables as gv
 
 class GestureController:
 
@@ -71,6 +71,10 @@ class MainLogic(Node):
 
         self.cb_group = ReentrantCallbackGroup()
 
+        # status for pausing
+        self.is_paused = False
+        self.is_aborted = False
+
         # TODO: [Christoph] confirm voice topic content & allowed commands
         self.voice_sub = self.create_subscription(
             String,
@@ -110,6 +114,8 @@ class MainLogic(Node):
         if not cmd:
             return
 
+        self.get_logger().info(f"Voice Command received: '{raw}'" )
+
         if cmd == "abort":
             self.abort_command_logic()
         elif cmd == "pause":
@@ -123,22 +129,46 @@ class MainLogic(Node):
 
     # TODO: [Christoph]
     def abort_command_logic(self) -> None:
-        self.get_logger().info("TODO[Christoph]: abort_command_logic()")
+        self.get_logger().warn(">>> ABORT COMMAND EXECUTED <<<")
+        self.is_aborted = True
+        
+        # 1. Main Loop Timmer is being stopped, so no logic continues
+        if self.control_timer:
+            self.contril_timer.cancel()
+
+        # 2. Hardware is being stopped
         self.gesture.abort()
 
     # TODO: [Christoph] (needs to include doing the gesture)
     def pause_command_logic(self) -> None:
-        self.get_logger().info("TODO[Christoph]: pause_command_logic()")
+        if self.is_aborted:
+            self.get_logger().warn("Cannot pause: System is aborted.")
+            return
+        
+        self.get_logger().info(">>> PAUSING SYSTEM <<<")
+        self.is_paused = True
+
         self.gesture.pause()
 
     # TODO: [Christoph]
     def where_are_you_going_logic(self) -> None:
-        self.get_logger().info("TODO[Christoph]: where_are_you_going_logic()")
-        self.get_logger().info(f"Current target: {currentTargetGlobal}")
+        current_target = gv.currentTargetGlobal
+
+        if current_target:
+            self.get_logger().info(f"VOICE ANSWER: I am going to target '{current_target}'.")
+            # We could use Text-To_Speech here
+        else:
+            self.get_logger().info(f"VOICE ANSWER: I have no target selected yet.")
 
     # TODO: [Christoph]
     def continue_logic(self) -> None:
-        self.get_logger().info("TODO[Christoph]: continue_logic()")
+        if self.is_aborted:
+            self.get_logger().warn("Cannot continue: System is aborted. Please restart node.")
+            return
+        
+        self.get_logger().info(">>> RESUMING SYSTEM <<<")
+        self.is_paused = False
+
         self.gesture.resume()
 
     # -------------------------
@@ -146,16 +176,24 @@ class MainLogic(Node):
     # -------------------------
     def main_control_loop(self) -> None:
         # TODO: [Team] logic if target is reached -> define later
+        
+        # 1. If paused or aborted, do nothing
+        if self.is_paused or self.is_aborted:
+            return
+        
+        # 2. Check, if target is reached
         if not self._is_target_reached():
             return
 
-        # select next target
+        self.get_logger().info("Target reached! Selecting new target...")
+
+        # 3. Select next target
         self._select_new_target_safe(initial=False)
 
-        # target selected gesture
+        # 4. Target selected gesture
         self.gesture.target_selected()
 
-        # TODO: [Franzi] point towards new target
+        # 5. TODO: [Franzi] point towards new target
         self._target_indication()
 
     # TODO: [Team]
@@ -168,15 +206,12 @@ class MainLogic(Node):
     def _select_new_target_safe(self, initial: bool) -> None:
         try:
             if initial:
-                selectNewTarget()
+                new_tgt = selectNewTarget(None)
             else:
-                selectNewTarget(currentTargetGlobal)
-        except TypeError:
-            # fallback if signature differs
-            try:
-                selectNewTarget(currentTargetGlobal)
-            except Exception as e:
-                self.get_logger().error(f"selectNewTarget failed: {e}")
+                new_tgt = selectNewTarget(gv.currentTargetGlobal)
+
+            self.get_logger().info(f"New target selected: {new_tgt}")
+
         except Exception as e:
             self.get_logger().error(f"selectNewTarget failed: {e}")
 
