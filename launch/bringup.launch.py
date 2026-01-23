@@ -11,8 +11,20 @@ def generate_launch_description():
         ),
         Node(
             package="meeseeks",
+            executable="robot_initialization",
+            name="robot_initialization",
+            output="screen",
+        ),
+        Node(
+            package="meeseeks",
             executable="main_logic",
             name="main_logic",
+            output="screen",
+        ),
+        Node(
+            package="meeseeks",
+            executable="pointing_to_target_logic",
+            name="pointing_to_target",
             output="screen",
         ),
     ])

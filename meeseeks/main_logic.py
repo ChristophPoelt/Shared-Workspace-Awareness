@@ -71,6 +71,13 @@ class MainLogic(Node):
 
         self.cb_group = ReentrantCallbackGroup()
 
+        # Service client for robot initialization (Franzi)
+        self.robot_init_client = self.create_client(
+            Trigger,
+            "/robot/initialize",
+            callback_group=self.cb_group,
+        )
+
         # TODO: [Christoph] confirm voice topic content & allowed commands
         self.voice_sub = self.create_subscription(
             String,
@@ -183,9 +190,27 @@ class MainLogic(Node):
     # -------------------------
     # Franzi placeholders
     # -------------------------
-    # TODO: [Franzi]
     def _initial_pose(self) -> None:
-        self.get_logger().info("TODO[Franzi]: initial pose (drive to 0.0 + reset arm)")
+        self.get_logger().info("Requesting robot initialization...")
+
+        if not self.robot_init_client.wait_for_service(timeout_sec=5.0):
+            self.get_logger().error("Robot initialization service not available")
+            return
+
+        future = self.robot_init_client.call_async(Trigger.Request())
+
+        def _done_cb(f):
+            try:
+                resp = f.result()
+                if resp.success:
+                    self.get_logger().info("Robot initialized successfully")
+                else:
+                    self.get_logger().warn("Robot initialization failed")
+            except Exception as e:
+                self.get_logger().error(f"Initialization service error: {e}")
+
+        future.add_done_callback(_done_cb)
+
 
     # TODO: [Franzi]
     def _target_indication(self) -> None:
