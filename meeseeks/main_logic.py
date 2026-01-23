@@ -91,7 +91,7 @@ class MainLogic(Node):
         self.gesture = GestureController(self, self.cb_group)
 
         # ----- Init sequence -----
-        # TODO: [Franzi] bring robot into initial position (drive to 0.0 + reset arm pose)
+        # done [Franzi] bring robot into initial position (drive to 0.0 + reset arm pose)
         self._initial_pose()
 
         # select initial target
@@ -212,9 +212,11 @@ class MainLogic(Node):
         future.add_done_callback(_done_cb)
 
 
-    # TODO: [Franzi]
+    # No action needed here: pointing_to_target_logic node handles moving joint_1 toward the current target
     def _target_indication(self) -> None:
-        self.get_logger().info("TODO[Franzi]: target indication gesture (pointing)")
+        self.get_logger().info(
+            "Pointing gesture is handled by the separate pointing_to_target_logic node"
+        )
 
 
 def main(args=None):
