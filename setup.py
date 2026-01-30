@@ -27,13 +27,13 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'move_straight = meeseeks.move_straight:main',
-            'move_straight2 = meeseeks.move_straight2:main',
-            'five_star = meeseeks.five_star:main',
-            'five_star2 = meeseeks.five_star2:main',
-            'target_selected_gesture = meeseeks.rtarget_selected_gesture:main',
+            'angle_calculation = angle_calculation:main',
+            'globalVariables = globalVariables:main',
             'robot_gestures = meeseeks.robot_gestures:main',
             'main_logic = meeseeks.main_logic:main',
+            'pointing_to_target_logic = pointing_to_target_logic:main',
+            'robot_initialization = robot_initialization:main',
+            'targetSelection = targetSelection:main'
         ],
     },
 )
