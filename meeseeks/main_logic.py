@@ -156,7 +156,7 @@ class MainLogic(Node):
 
         if current_target:
             self.get_logger().info(f"VOICE ANSWER: I am going to target '{current_target}'.")
-            # We could use Text-To_Speech here
+            # We could use Text_To_Speech here
         else:
             self.get_logger().info(f"VOICE ANSWER: I have no target selected yet.")
 
@@ -181,7 +181,7 @@ class MainLogic(Node):
         if self.is_paused or self.is_aborted:
             return
         
-        # 2. Check, if target is reached
+        # 2. If target is not reached, do nothing
         if not self._is_target_reached():
             return
 
