@@ -27,13 +27,13 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'angle_calculation = angle_calculation:main',
-            'globalVariables = globalVariables:main',
+            'angle_calculation = meeseeks.angle_calculation:main',
+            'globalVariables = meeseeks.globalVariables:main',
             'robot_gestures = meeseeks.robot_gestures:main',
             'main_logic = meeseeks.main_logic:main',
-            'pointing_to_target_logic = pointing_to_target_logic:main',
-            'robot_initialization = robot_initialization:main',
-            'targetSelection = targetSelection:main'
+            'pointing_to_target_logic = meeseeks.pointing_to_target_logic:main',
+            'robot_initialization = meeseeks.robot_initialization:main',
+            'targetSelection = meeseeks.targetSelection:main'
         ],
     },
 )
