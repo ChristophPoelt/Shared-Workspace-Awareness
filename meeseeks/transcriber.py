@@ -24,6 +24,9 @@ import sys
 import os
 import torch
 from silero_vad import load_silero_vad, get_speech_timestamps
+from main_logic import GestureController
+
+
 
 # Suppress portaudio/sounddevice core dump on exit
 libgcc = ctypes.CDLL("libgcc_s.so.1")
@@ -37,7 +40,7 @@ MODEL_SIZE = "base"        # tiny / base
 
 LOG_PROB_THRESHOLD = -2.0  # secondary filter for low-confidence transcriptions
 VAD_THRESHOLD = 0.5        # silero VAD sensitivity (0-1, higher = stricter)
-SUPPRESS_STDERR = True     # set to False on hardware that supports NNPACK
+SUPPRESS_STDERR = False     # set to False on hardware that supports NNPACK
 
 # ─── Shared state ─────────────────────────────────────────────────────────────
 
@@ -171,14 +174,14 @@ def handle_transcription(text: str, elapsed: float):
     # non functional
     text_lower = text.lower()
 
-    if "pause" in text_lower:
-        print("pause command recognized\n")
-    elif "continue" in text_lower:
-        print("continue command recognized\n")
-    elif "abort" in text_lower:
-        print("abort command recognized\n")
-    elif "whare are you going" in text_lower:
-        print("target indication command recognized\n")
+    # if "pause" in text_lower:
+    #     print("pause command recognized\n")
+    # elif "continue" in text_lower:
+    #     print("continue command recognized\n")
+    # elif "abort" in text_lower:
+    #     print("abort command recognized\n")
+    # elif "whare are you going" in text_lower:
+    #     print("target indication command recognized\n")
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
