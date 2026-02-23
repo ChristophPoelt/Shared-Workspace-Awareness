@@ -55,6 +55,14 @@ def generate_launch_description():
             condition=is_real,
         ),
 
+        Node(
+            package="meeseeks",
+            executable="transcriber",
+            name="transcriber",
+            output="screen",
+            condition=is_real,
+        ),
+
         # --- Dummy carriage only in demo (because sim doesn't publish it) ---
         Node(
             package="meeseeks",
