@@ -4,6 +4,9 @@ from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch.actions import ExecuteProcess   # ✅ correct
 from launch_ros.actions import Node         # Node stays here
+from launch.substitutions import LaunchConfiguration
+
+voice_python = LaunchConfiguration("voice_python")
 
 def generate_launch_description():
     demo = LaunchConfiguration("demo")
@@ -23,7 +26,7 @@ def generate_launch_description():
 
     transcriber = ExecuteProcess(
         cmd=[
-            "/home/shiyi-gou/venvs/voice/bin/python3",
+            voice_python,
             "-m",
             "meeseeks.transcriber",
             "--ros-args",
@@ -47,6 +50,11 @@ def generate_launch_description():
             "controller_manager",
             default_value="/controller_manager",
             description="Controller manager node name (change if namespaced)",
+        ),
+        DeclareLaunchArgument(
+            "voice_python",
+            default_value="python3",
+            description="Python executable used to run the transcriber (e.g., /path/to/venv/bin/python3).",
         ),
 
         # --- Always run gestures (so you can test them) ---
