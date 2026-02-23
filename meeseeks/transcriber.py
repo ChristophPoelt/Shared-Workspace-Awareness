@@ -22,10 +22,13 @@ import ctypes
 import time
 import sys
 import os
-import torch
-from silero_vad import load_silero_vad, get_speech_timestamps
 from main_logic import GestureController
+import rclpy
+from std_msgs.msg import String
 
+rclpy.init()
+voice_node = rclpy.create_node("voice_transcriber")
+voice_pub = voice_node.create_publisher(String, "/voice_commands", 10)
 
 
 # Suppress portaudio/sounddevice core dump on exit
@@ -167,25 +170,18 @@ def transcription_worker(whisper_model, vad_model):
 # ─── Handle transcription output ──────────────────────────────────────────────
 
 def handle_transcription(text: str, elapsed: float):
+    global voice_pub  # <- make sure Python sees it
     sys.stdout.write(f"\r[Transcription | {elapsed:.1f}s] {text}\n")
     sys.stdout.flush()
 
-    # ─── Phrase detection ──────────────────────────────────────────────────────
-    # non functional
-    text_lower = text.lower()
-
-    # if "pause" in text_lower:
-    #     print("pause command recognized\n")
-    # elif "continue" in text_lower:
-    #     print("continue command recognized\n")
-    # elif "abort" in text_lower:
-    #     print("abort command recognized\n")
-    # elif "whare are you going" in text_lower:
-    #     print("target indication command recognized\n")
-
+    msg = String()
+    msg.data = text
+    voice_pub.publish(msg)
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
+    
+
     print(f"Loading Whisper model '{MODEL_SIZE}'...")
     whisper_model = whisper.load_model(MODEL_SIZE)
 
@@ -209,6 +205,7 @@ def main():
         ):
             while True:
                 sd.sleep(100)
+                rclpy.spin_once(voice_node, timeout_sec=0)
     except KeyboardInterrupt:
         print("\nStopping...")
     finally:
@@ -216,6 +213,9 @@ def main():
         audio_queue.put(None)
         t_transcribe.join(timeout=5)
         t_status.join(timeout=2)
+        voice_node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
         print("Stopped cleanly.")
 
 if __name__ == "__main__":
