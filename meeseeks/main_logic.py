@@ -133,19 +133,19 @@ class MainLogic(Node):
     # -------------------------
     def _on_voice_command(self, msg: String) -> None:
         raw = (msg.data or "").strip()
-        cmd = raw.lower().replace(" ", "")
+        cmd = raw.lower()
         if not cmd:
             return
 
         self.get_logger().info(f"Voice command received: '{raw}'")
 
-        if cmd == "abort":
+        if "abort" in cmd:
             self.abort_command_logic()
-        elif cmd == "pause":
+        elif "pause" in cmd:
             self.pause_command_logic()
-        elif cmd in ("whereareyougoing", "where_are_you_going"):
+        elif "where" in cmd and "going" in cmd:
             self.where_are_you_going_logic()
-        elif cmd in ("continue", "resume"):
+        elif "continue" in cmd:
             self.continue_logic()
         else:
             self.get_logger().warn(f"Unknown voice command: '{raw}'")
