@@ -11,3 +11,20 @@ __pycache__/
 # Editor / OS
 .vscode/
 .DS_Store
+whisper/whisper-env/
+
+# ROS2 artifacts
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+
+# Virtual envs
+.venv/
+venv/
+env/
