@@ -173,10 +173,12 @@ def handle_transcription(text: str, elapsed: float):
 
     if "pause" in text_lower:
         print("pause command recognized\n")
-    elif "target" in text_lower:
-        print("point to target command recognized. maybe\n")
-    elif "stop" in text_lower:
+    elif "continue" in text_lower:
+        print("continue command recognized\n")
+    elif "abort" in text_lower:
         print("abort command recognized\n")
+    elif "whare are you going" in text_lower:
+        print("target indication command recognized\n")
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
