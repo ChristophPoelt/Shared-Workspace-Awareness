@@ -4,15 +4,16 @@ from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 
-from std_msgs.msg import String
+from std_msgs.msg import String, Float64
 from std_srvs.srv import Trigger
 
 from meeseeks.targetSelection import selectNewTarget
-from meeseeks.globalVariables import currentTargetGlobal
+import meeseeks.globalVariables as gv
+
 
 class GestureController:
+    """Wrapper around RobotGestures Trigger services."""
 
-    # wrapper around RobotGestures Trigger services.
     def __init__(self, node: Node, cb_group: ReentrantCallbackGroup):
         self._node = node
         self._cli_target_selected = node.create_client(
@@ -50,11 +51,9 @@ class GestureController:
 
         fut.add_done_callback(_done_cb)
 
-    # gesture call
     def target_selected(self) -> None:
         self._call_async(self._cli_target_selected, "/gesture/target_selected")
 
-    # Used by Christoph section (optional)
     def pause(self) -> None:
         self._call_async(self._cli_pause, "/gesture/pause")
 
@@ -71,6 +70,11 @@ class MainLogic(Node):
 
         self.cb_group = ReentrantCallbackGroup()
 
+        # ─── State tracking ────────────────────────────────────────────────
+        self.current_carriage_pos = None
+        self.target_position_threshold = 0.15  # meters
+        self.state = "initializing"  # initializing, ready, paused, aborting
+
         # Service client for robot initialization (Franzi)
         self.robot_init_client = self.create_client(
             Trigger,
@@ -78,8 +82,17 @@ class MainLogic(Node):
             callback_group=self.cb_group,
         )
 
-        # TODO: [Christoph] confirm voice topic content & allowed commands
-        self.voice_sub = self.create_subscription(
+        # Subscribe to carriage position for target reach detection
+        self.create_subscription(
+            Float64,
+            "/elmo/id1/carriage/position/get",
+            self._on_carriage_position,
+            10,
+            callback_group=self.cb_group,
+        )
+
+        # Voice command subscription
+        self.create_subscription(
             String,
             "/voice_commands",
             self._on_voice_command,
@@ -87,21 +100,28 @@ class MainLogic(Node):
             callback_group=self.cb_group,
         )
 
-        # gesture client wrapper
+        # Gesture client wrapper
         self.gesture = GestureController(self, self.cb_group)
 
+        self.get_logger().info("=" * 60)
+        self.get_logger().info("MainLogic Node Starting (manual voice input via /voice_commands)")
+        self.get_logger().info("=" * 60)
+
         # ----- Init sequence -----
-        # done [Franzi] bring robot into initial position (drive to 0.0 + reset arm pose)
         self._initial_pose()
 
-        # select initial target
+        # Select initial target + update global
         self._select_new_target_safe(initial=True)
+        self.get_logger().info(f"Initial target selected: {gv.currentTargetGlobal}")
 
-        # target selected gesture
+        # Target selected gesture
         self.gesture.target_selected()
 
-        # TODO: [Franzi] target indication gesture (pointing)
+        # Target indication gesture (pointing handled elsewhere)
         self._target_indication()
+
+        self.state = "ready"
+        self.get_logger().info("Initialization complete. Robot ready.")
 
         # Main loop timer
         self.control_timer = self.create_timer(
@@ -109,7 +129,7 @@ class MainLogic(Node):
         )
 
     # -------------------------
-    # Christoph: Voice commands
+    # Voice commands
     # -------------------------
     def _on_voice_command(self, msg: String) -> None:
         raw = (msg.data or "").strip()
@@ -117,78 +137,123 @@ class MainLogic(Node):
         if not cmd:
             return
 
+        self.get_logger().info(f"Voice command received: '{raw}'")
+
         if cmd == "abort":
             self.abort_command_logic()
         elif cmd == "pause":
-            self.pause_command_logic()  # must include gesture
+            self.pause_command_logic()
         elif cmd in ("whereareyougoing", "where_are_you_going"):
             self.where_are_you_going_logic()
-        elif cmd == "continue":
+        elif cmd in ("continue", "resume"):
             self.continue_logic()
         else:
             self.get_logger().warn(f"Unknown voice command: '{raw}'")
 
-    # TODO: [Christoph]
     def abort_command_logic(self) -> None:
-        self.get_logger().info("TODO[Christoph]: abort_command_logic()")
+        self.get_logger().info("ABORT: Stopping all operations")
+        self.state = "aborting"
         self.gesture.abort()
+        self.get_logger().info("Robot aborted and frozen")
+        self.state = "ready"
 
-    # TODO: [Christoph] (needs to include doing the gesture)
     def pause_command_logic(self) -> None:
-        self.get_logger().info("TODO[Christoph]: pause_command_logic()")
-        self.gesture.pause()
+        self.get_logger().info("PAUSE: Pausing robot movement")
+        if self.state == "ready":
+            self.state = "paused"
+            self.gesture.pause()
+            self.get_logger().info("Robot paused")
+        else:
+            self.get_logger().warn(f"Cannot pause in state: {self.state}")
 
-    # TODO: [Christoph]
     def where_are_you_going_logic(self) -> None:
-        self.get_logger().info("TODO[Christoph]: where_are_you_going_logic()")
-        self.get_logger().info(f"Current target: {currentTargetGlobal}")
+        self.get_logger().info("WHERE ARE YOU GOING?")
+        self.get_logger().info(f"  Current target: {gv.currentTargetGlobal}")
+        if self.current_carriage_pos is not None:
+            self.get_logger().info(f"  Current position: {self.current_carriage_pos:.3f}")
+        else:
+            self.get_logger().info("  Current position: unknown (no data yet)")
 
-    # TODO: [Christoph]
     def continue_logic(self) -> None:
-        self.get_logger().info("TODO[Christoph]: continue_logic()")
-        self.gesture.resume()
+        self.get_logger().info("CONTINUE: Resuming robot movement")
+        if self.state == "paused":
+            self.state = "ready"
+            self.gesture.resume()
+            self.get_logger().info("Robot resumed")
+        else:
+            self.get_logger().warn(f"Nothing to resume (state: {self.state})")
 
     # -------------------------
     # Main control loop
     # -------------------------
+    def _on_carriage_position(self, msg: Float64) -> None:
+        self.current_carriage_pos = msg.data
+
     def main_control_loop(self) -> None:
-        # TODO: [Team] logic if target is reached -> define later
+        if self.state != "ready":
+            return
+
         if not self._is_target_reached():
             return
 
-        # select next target
+        self.get_logger().warn("=" * 60)
+        self.get_logger().warn("TARGET REACHED!")
+        self.get_logger().warn("=" * 60)
+
         self._select_new_target_safe(initial=False)
+        self.get_logger().info(f"New target selected: {gv.currentTargetGlobal}")
 
-        # target selected gesture
         self.gesture.target_selected()
-
-        # TODO: [Franzi] point towards new target
         self._target_indication()
 
-    # TODO: [Team]
+    # ─── Target Reach Detection ────────────────────────────────────────────
     def _is_target_reached(self) -> bool:
-        return False
+        if self.current_carriage_pos is None:
+            return False
+
+        TARGET_POSITIONS = {
+            "position0": 2.7,
+            "position1": -2.5,
+            "position2": -1.0,
+        }
+
+        if gv.currentTargetGlobal not in TARGET_POSITIONS:
+            self.get_logger().warn(f"Unknown target: {gv.currentTargetGlobal}")
+            return False
+
+        target_pos = TARGET_POSITIONS[gv.currentTargetGlobal]
+        distance = abs(self.current_carriage_pos - target_pos)
+        reached = distance < self.target_position_threshold
+
+        if distance < 0.3:
+            self.get_logger().info(
+                f"Target: {gv.currentTargetGlobal} ({target_pos:.3f}), "
+                f"Current: {self.current_carriage_pos:.3f}, "
+                f"Distance: {distance:.3f}m {'✓ REACHED' if reached else ''}"
+            )
+
+        return reached
 
     # -------------------------
     # Helpers
     # -------------------------
     def _select_new_target_safe(self, initial: bool) -> None:
+        """Select a new target and FORCE update the global state."""
         try:
-            if initial:
-                selectNewTarget()
-            else:
-                selectNewTarget(currentTargetGlobal)
-        except TypeError:
-            # fallback if signature differs
-            try:
-                selectNewTarget(currentTargetGlobal)
-            except Exception as e:
-                self.get_logger().error(f"selectNewTarget failed: {e}")
+            prev = gv.currentTargetGlobal
+            target = selectNewTarget(None if initial else prev)
+
+            # Force-update global, even if selectNewTarget() only returns a value
+            gv.currentTargetGlobal = target
+            self.get_logger().info(f"Selected target: {target}")
+
         except Exception as e:
             self.get_logger().error(f"selectNewTarget failed: {e}")
+            self.get_logger().warn("Falling back to position0")
+            gv.currentTargetGlobal = "position0"
 
     # -------------------------
-    # Franzi placeholders
+    # Robot init (Franzi)
     # -------------------------
     def _initial_pose(self) -> None:
         self.get_logger().info("Requesting robot initialization...")
@@ -202,17 +267,18 @@ class MainLogic(Node):
         def _done_cb(f):
             try:
                 resp = f.result()
-                if resp.success:
+                if resp and resp.success:
                     self.get_logger().info("Robot initialized successfully")
+                elif resp:
+                    self.get_logger().warn(f"Robot initialization failed: {resp.message}")
                 else:
-                    self.get_logger().warn("Robot initialization failed")
+                    self.get_logger().warn("Robot initialization: no response")
             except Exception as e:
                 self.get_logger().error(f"Initialization service error: {e}")
 
         future.add_done_callback(_done_cb)
 
-
-    # No action needed here: pointing_to_target_logic node handles moving joint_1 toward the current target
+    # Pointing node handles moving joint_1 toward the current target
     def _target_indication(self) -> None:
         self.get_logger().info(
             "Pointing gesture is handled by the separate pointing_to_target_logic node"
@@ -239,43 +305,3 @@ def main(args=None):
 
 if __name__ == "__main__":
     main()
-
-
-
-#from targetSelection import selectNewTarget
-#from globalVariables import currentTargetGlobal
-
-#here we could handle the starting of all the nodes etc.
-
-#init function that:
-#subscribes to all needed nodes 
-#starts all needed nodes
-#-> Shiyi copies here already existing structure for the init function
-
-#bring robot in inital position (drive to 0.0 and correct arm position)
-#-> Franzi
-
-#select an inital target
-#selectNewTarget
-
-#do the target selected gesture -> Shiyi
-
-#do the target indication gesture (point towards target) ->  Franzi
-
-#if loop that handles all the voice commands and then 
-#calls the according python script
-
-#pseudo code: -> Christoph
-#if abort command was detected:
-#   call abort_command_logic
-#if pause command was detected:
-#   call pause_command_logic (needs to include doing the gesture)
-#if whereAreYouGoing is detected:
-#   call whereAreYouGoing_logic
-#if continue is detected:
-#   call continue_logic
-
-#logic if target is reached -> we will figure it our later
-
-#select the next target
-#selectNewTarget(currentTargetGlobal)

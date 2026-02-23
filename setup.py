@@ -33,7 +33,10 @@ setup(
             'main_logic = meeseeks.main_logic:main',
             'pointing_to_target_logic = meeseeks.pointing_to_target_logic:main',
             'robot_initialization = meeseeks.robot_initialization:main',
-            'targetSelection = meeseeks.targetSelection:main'
+            'targetSelection = meeseeks.targetSelection:main',
+            'demo_dummy_services = meeseeks.demo_dummy_services:main',
+            'demo_dummy_carriage = meeseeks.demo_dummy_carriage:main',
+            'voice_cli_publisher = meeseeks.voice_cli_pub:main',
         ],
     },
 )

@@ -6,8 +6,8 @@ from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from std_msgs.msg import Float64
 
-from angle_calculation import ClockwiseRail
-from globalVariables import currentTargetGlobal
+from .angle_calculation import ClockwiseRail
+from .globalVariables import currentTargetGlobal
 
 # Numeric positions for targets
 TARGET_POSITIONS = {
