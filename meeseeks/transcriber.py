@@ -22,14 +22,14 @@ import ctypes
 import time
 import sys
 import os
-from main_logic import GestureController
+# from .main_logic import GestureController
 import rclpy
 from std_msgs.msg import String
 
-rclpy.init()
-voice_node = rclpy.create_node("voice_transcriber")
-voice_pub = voice_node.create_publisher(String, "/voice_commands", 10)
-
+# voice_node = rclpy.create_node("voice_transcriber")
+# voice_pub = voice_node.create_publisher(String, "/voice_commands", 10)
+voice_node = None
+voice_pub = None
 
 # Suppress portaudio/sounddevice core dump on exit
 libgcc = ctypes.CDLL("libgcc_s.so.1")
@@ -170,17 +170,32 @@ def transcription_worker(whisper_model, vad_model):
 # ─── Handle transcription output ──────────────────────────────────────────────
 
 def handle_transcription(text: str, elapsed: float):
-    global voice_pub  # <- make sure Python sees it
+    global voice_pub, voice_node
     sys.stdout.write(f"\r[Transcription | {elapsed:.1f}s] {text}\n")
     sys.stdout.flush()
 
+    if voice_pub is None or voice_node is None:
+        return
+    if not rclpy.ok():
+        return
+
     msg = String()
     msg.data = text
-    voice_pub.publish(msg)
+    try:
+        voice_pub.publish(msg)
+    except Exception as e:
+        print(f"[WARN] publish failed: {e}")
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    
+    global voice_node, voice_pub
+
+    # ROS init must only happen once per process
+    if not rclpy.ok():
+        rclpy.init()
+
+    voice_node = rclpy.create_node("transcriber")
+    voice_pub = voice_node.create_publisher(String, "/voice_commands", 10)
 
     print(f"Loading Whisper model '{MODEL_SIZE}'...")
     whisper_model = whisper.load_model(MODEL_SIZE)
@@ -213,10 +228,11 @@ def main():
         audio_queue.put(None)
         t_transcribe.join(timeout=5)
         t_status.join(timeout=2)
-        voice_node.destroy_node()
+
+        if voice_node is not None:
+            voice_node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
-        print("Stopped cleanly.")
 
 if __name__ == "__main__":
     main()

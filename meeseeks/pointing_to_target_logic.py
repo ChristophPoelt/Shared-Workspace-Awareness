@@ -7,7 +7,7 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from std_msgs.msg import Float64
 
 from .angle_calculation import ClockwiseRail
-from .globalVariables import currentTargetGlobal
+from std_msgs.msg import String
 
 # Numeric positions for targets
 TARGET_POSITIONS = {
@@ -19,7 +19,11 @@ TARGET_POSITIONS = {
 
 class PointJoint1Node(Node):
     def __init__(self):
-        super().__init__("point_joint1_node")
+        super().__init__("point_joint1_node_logic")
+
+
+        self.current_target = None
+        self.create_subscription(String, "/selected_target", self._on_target, 10)
 
         self.current_joint_state = None
         self.current_rail_pos = None
@@ -45,6 +49,9 @@ class PointJoint1Node(Node):
             zero_offset=0.8,
         )
 
+    def _on_target(self, msg):
+        self.current_target = msg.data
+        self.get_logger().info(f"[TARGET UPDATE] {self.current_target}")
     # ----------------------
     # Callbacks
     # ----------------------
@@ -61,38 +68,39 @@ class PointJoint1Node(Node):
     def update_joint1(self):
         if self.current_joint_state is None or self.current_rail_pos is None:
             return
-        if currentTargetGlobal not in TARGET_POSITIONS:
-            self.get_logger().warn(f"Unknown target: {currentTargetGlobal}")
+
+        if self.current_target is None:
+            return  # wait until we have a target
+
+        if self.current_target not in TARGET_POSITIONS:
+            self.get_logger().warn(f"Unknown target: {self.current_target}")
             return
 
-        target_pos = TARGET_POSITIONS[currentTargetGlobal]
+        target_pos = TARGET_POSITIONS[self.current_target]
 
-        # Compute yaw angle
         yaw_angle = self.rail.calculate_yaw_to_target(
             current_pos_raw=self.current_rail_pos,
             target_pos_raw=target_pos,
         )
 
-        self.get_logger().info(f"Pointing: rail {self.current_rail_pos:.4f}, target {target_pos:.4f}, yaw {yaw_angle:.4f}")
-
-        # Keep all joints at current positions except joint_1
-        name_to_position = dict(
-            zip(self.current_joint_state.name, self.current_joint_state.position)
+        self.get_logger().info(
+            f"Pointing: rail {self.current_rail_pos:.4f}, target {target_pos:.4f}, yaw {yaw_angle:.4f}"
         )
+
+        name_to_position = dict(zip(self.current_joint_state.name, self.current_joint_state.position))
         joint_names = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
         positions = [name_to_position[j] for j in joint_names]
-        positions[0] = yaw_angle  # joint_1
+        positions[0] = yaw_angle
 
         traj = JointTrajectory()
         traj.joint_names = joint_names
 
         point = JointTrajectoryPoint()
         point.positions = positions
-        point.time_from_start.sec = 1  # 1 second to reach pointing pose
+        point.time_from_start.sec = 1
         traj.points.append(point)
 
         self.traj_pub.publish(traj)
-        self.get_logger().info("Published joint_1 pointing trajectory")
 
 
 def main(args=None):

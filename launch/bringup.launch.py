@@ -2,8 +2,8 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, TimerAction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
-from launch_ros.actions import Node
-
+from launch.actions import ExecuteProcess   # ✅ correct
+from launch_ros.actions import Node         # Node stays here
 
 def generate_launch_description():
     demo = LaunchConfiguration("demo")
@@ -19,6 +19,17 @@ def generate_launch_description():
             "'", demo, "' == 'true' and '",
             spawn_gripper_controller, "' == 'true'"
         ])
+    )
+
+    transcriber = ExecuteProcess(
+        cmd=[
+            "/home/shiyi-gou/venvs/voice/bin/python3",
+            "-m",
+            "meeseeks.transcriber",
+            "--ros-args",
+            "-r", "__node:=transcriber",
+        ],
+        output="screen",
     )
 
     return LaunchDescription([
@@ -51,14 +62,6 @@ def generate_launch_description():
             package="meeseeks",
             executable="robot_initialization",
             name="robot_initialization",
-            output="screen",
-            condition=is_real,
-        ),
-
-        Node(
-            package="meeseeks",
-            executable="transcriber",
-            name="transcriber",
             output="screen",
             condition=is_real,
         ),
@@ -104,4 +107,5 @@ def generate_launch_description():
             name="pointing_to_target",
             output="screen",
         ),
+        transcriber,
     ])

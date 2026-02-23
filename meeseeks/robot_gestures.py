@@ -6,23 +6,25 @@ from typing import Optional, Tuple
 
 import rclpy
 from rclpy.node import Node
-from rclpy.action import ActionClient, ClientGoalHandle
+from rclpy.action import ActionClient
+from rclpy.action.client import ClientGoalHandle
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 from std_srvs.srv import Trigger
 from control_msgs.action import GripperCommand
 from std_msgs.msg import Float64MultiArray
 
 
-class GripperBackend(Enum):
-    ACTION = "action"
-    SIM_TOPIC = "sim_topic"
-    NONE = "none"
+class BackendMode(str, Enum):
+    AUTO = "auto"     # action if server exists, else sim topic
+    ACTION = "action" # always action (error if server not available)
+    SIM = "sim"       # always sim topic
 
 
 class RobotGestures(Node):
     """
-    Unified gesture node.
+    Gesture node for Robotiq gripper.
 
     Services (std_srvs/Trigger):
       - /gesture/target_selected : CLOSE -> OPEN -> CLOSE -> OPEN (fire-and-forget)
@@ -32,61 +34,67 @@ class RobotGestures(Node):
     """
 
     def __init__(self):
-        super().__init__(
-            "robot_gestures",
-            allow_undeclared_parameters=True,
-            automatically_declare_parameters_from_overrides=True,
-        )
+        super().__init__("robot_gestures")
 
         # --------------------------
         # Parameters
         # --------------------------
-        # Real robot (action)
+        self.declare_parameter("backend", BackendMode.AUTO.value)
+        self.declare_parameter("server_wait_s", 0.2)
+
+        # Action backend (real robot)
         self.declare_parameter("gripper_action_name", "/robotiq_gripper_controller/gripper_cmd")
         self.declare_parameter("open_position", 0.0)
         self.declare_parameter("close_position", 0.8)
         self.declare_parameter("max_effort", 100.0)
 
+        # Sim backend (topic)
+        self.declare_parameter("sim_gripper_topic", "/gripper_controller/commands")
+
         # Gesture timing
         self.declare_parameter("pause_s", 0.5)
 
-        # How long to wait when checking action server availability (startup / periodic)
-        self.declare_parameter("server_wait_s", 0.2)
+        # Read parameters
+        backend_str = str(self.get_parameter("backend").value).strip().lower()
+        self._backend_mode = BackendMode(backend_str) if backend_str in BackendMode._value2member_map_ else BackendMode.AUTO
 
-        # Simulation fallback (topic)
-        self.declare_parameter("sim_gripper_topic", "/gripper_controller/commands")
-        # NOTE: keep these as you discovered them (your sim mapping can differ from the real robot)
-        self.declare_parameter("sim_open_position", 0.6)
-        self.declare_parameter("sim_close_position", 0.0)
-
-        # Read params
+        self._server_wait_s = float(self.get_parameter("server_wait_s").value)
         self._action_name = str(self.get_parameter("gripper_action_name").value)
+
         self._open_pos = float(self.get_parameter("open_position").value)
         self._close_pos = float(self.get_parameter("close_position").value)
         self._max_effort = float(self.get_parameter("max_effort").value)
-        self._pause_s = float(self.get_parameter("pause_s").value)
-        self._server_wait_s = float(self.get_parameter("server_wait_s").value)
 
         self._sim_topic = str(self.get_parameter("sim_gripper_topic").value)
-        self._sim_open_pos = float(self.get_parameter("sim_open_position").value)
-        self._sim_close_pos = float(self.get_parameter("sim_close_position").value)
+        self._pause_s = float(self.get_parameter("pause_s").value)
 
         # --------------------------
         # State
         # --------------------------
         self._lock = threading.Lock()
-        self._busy = False
-        self._paused = False
-        self._abort_requested = False
+        self._busy: bool = False
+        self._paused: bool = False
+        self._abort_requested: bool = False
 
-        # Keep last goal handle (best-effort cancel)
         self._last_goal_handle: Optional[ClientGoalHandle] = None
+
+        # Create QoS profile with BEST_EFFORT reliability
+        qos = QoSProfile(depth=10)
+        qos.reliability = ReliabilityPolicy.BEST_EFFORT
+        qos.durability = DurabilityPolicy.VOLATILE
+        
+        self._sim_pub = self.create_publisher(Float64MultiArray, self._sim_topic, qos)
 
         # --------------------------
         # Gripper interfaces
         # --------------------------
         self._gripper_client = ActionClient(self, GripperCommand, self._action_name)
-        self._sim_pub = self.create_publisher(Float64MultiArray, self._sim_topic, 10)
+
+        # Match ros2_control subscriber QoS (often BEST_EFFORT)
+        qos = QoSProfile(depth=10)
+        qos.reliability = ReliabilityPolicy.BEST_EFFORT
+        qos.durability = DurabilityPolicy.VOLATILE
+        self._sim_pub = self.create_publisher(Float64MultiArray, self._sim_topic, qos)
 
         # --------------------------
         # Services
@@ -96,26 +104,35 @@ class RobotGestures(Node):
         self.create_service(Trigger, "/gesture/resume", self._on_resume)
         self.create_service(Trigger, "/gesture/abort", self._on_abort)
 
+        # --------------------------
+        # Log startup
+        # --------------------------
         self.get_logger().info("RobotGestures ready.")
-        self.get_logger().info(f"Gripper action: {self._action_name}")
-        self.get_logger().info(f"Real: open={self._open_pos}, close={self._close_pos}, effort={self._max_effort}")
-        self.get_logger().info(f"Sim:  open={self._sim_open_pos}, close={self._sim_close_pos}, topic={self._sim_topic}")
+        self.get_logger().info(f"Backend mode: {self._backend_mode.value}")
+        self.get_logger().info(f"Action: {self._action_name} (open={self._open_pos}, close={self._close_pos}, effort={self._max_effort})")
+        self.get_logger().info(f"Sim topic: {self._sim_topic}")
 
     # --------------------------
     # Backend selection
     # --------------------------
+    def _select_backend(self) -> BackendMode:
+        """
+        Returns ACTION or SIM based on backend mode + action server availability.
+        """
+        if self._backend_mode == BackendMode.SIM:
+            return BackendMode.SIM
 
-    def _select_backend(self) -> GripperBackend:
-        # Prefer action server if available
+        if self._backend_mode == BackendMode.ACTION:
+            return BackendMode.ACTION
+
+        # AUTO:
         if self._gripper_client.wait_for_server(timeout_sec=self._server_wait_s):
-            return GripperBackend.ACTION
-        # Otherwise fall back to sim topic (we can publish regardless of subscriber count)
-        return GripperBackend.SIM_TOPIC
+            return BackendMode.ACTION
+        return BackendMode.SIM
 
     # --------------------------
-    # Service callbacks
+    # Services
     # --------------------------
-
     def _on_target_selected(self, request, response):
         self.get_logger().info("SERVICE HIT: /gesture/target_selected")
 
@@ -136,7 +153,6 @@ class RobotGestures(Node):
 
     def _on_pause(self, request, response):
         self.get_logger().info("SERVICE HIT: /gesture/pause")
-
         with self._lock:
             self._paused = True
 
@@ -147,7 +163,6 @@ class RobotGestures(Node):
 
     def _on_resume(self, request, response):
         self.get_logger().info("SERVICE HIT: /gesture/resume")
-
         with self._lock:
             if not self._busy:
                 response.success = False
@@ -161,12 +176,11 @@ class RobotGestures(Node):
 
     def _on_abort(self, request, response):
         self.get_logger().info("SERVICE HIT: /gesture/abort")
-
         with self._lock:
             self._abort_requested = True
             self._paused = False
 
-        ok, msg = self._freeze_best_effort()
+        ok, msg = self._abort_best_effort()
         response.success = ok
         response.message = msg
         return response
@@ -174,27 +188,25 @@ class RobotGestures(Node):
     # --------------------------
     # Gesture runner
     # --------------------------
-
     def _run_target_selected_sequence(self):
+        """
+        CLOSE -> OPEN -> CLOSE -> OPEN with pauses.
+        Guaranteed to release busy flag.
+        """
         try:
             self.get_logger().info("Gesture: CLOSE -> OPEN -> CLOSE -> OPEN")
 
-            self._check_abort_or_pause()
-            self._send_gripper_no_wait(self._close_pos)
-            self._sleep_with_checks(self._pause_s)
+            seq = [self._close_pos, self._open_pos, self._close_pos, self._open_pos]
 
-            self._check_abort_or_pause()
-            self._send_gripper_no_wait(self._open_pos)
-            self._sleep_with_checks(self._pause_s)
+            for i, pos in enumerate(seq):
+                self._check_abort_or_pause()
+                self._send_gripper_no_wait(pos)
 
-            self._check_abort_or_pause()
-            self._send_gripper_no_wait(self._close_pos)
-            self._sleep_with_checks(self._pause_s)
+                # no extra sleep after last command
+                if i < len(seq) - 1:
+                    self._sleep_with_checks(self._pause_s)
 
-            self._check_abort_or_pause()
-            self._send_gripper_no_wait(self._open_pos)
-
-            self.get_logger().info("target_selected sequence sent (ends OPEN).")
+            self.get_logger().info("target_selected sequence done (ends OPEN).")
 
         except RuntimeError as e:
             self.get_logger().warn(f"Gesture stopped: {e}")
@@ -207,29 +219,21 @@ class RobotGestures(Node):
                 self._abort_requested = False
 
     # --------------------------
-    # Gripper helpers
+    # Sending gripper commands
     # --------------------------
-
-    def _map_real_to_sim(self, position: float) -> float:
-        # Map your canonical open/close to sim-specific values
-        if abs(position - self._open_pos) < 1e-6:
-            return self._sim_open_pos
-        if abs(position - self._close_pos) < 1e-6:
-            return self._sim_close_pos
-        # If you pass custom positions, forward them (use with care)
-        return float(position)
-
     def _send_gripper_no_wait(self, position: float) -> None:
         backend = self._select_backend()
+        self.get_logger().info(f"[GRIPPER] backend={backend.value}, pos={position}")
 
-        if backend == GripperBackend.ACTION:
+        if backend == BackendMode.ACTION:
+            if not self._gripper_client.wait_for_server(timeout_sec=self._server_wait_s):
+                # If user forced ACTION and it's not available, fail loudly.
+                raise RuntimeError("Action backend selected but action server is not available.")
+
             goal = GripperCommand.Goal()
             goal.command.position = float(position)
             goal.command.max_effort = float(self._max_effort)
 
-            self.get_logger().info(f"[GRIPPER ACTION] position={position}")
-
-            # Store last goal handle for best-effort cancellation
             future = self._gripper_client.send_goal_async(goal)
 
             def _on_goal_response(fut):
@@ -245,82 +249,92 @@ class RobotGestures(Node):
             future.add_done_callback(_on_goal_response)
             return
 
-        if backend == GripperBackend.SIM_TOPIC:
-            sim_value = self._map_real_to_sim(position)
-            msg = Float64MultiArray()
-            msg.data = [sim_value]
-            self._sim_pub.publish(msg)
+        # SIM
+        msg = Float64MultiArray()
+        msg.data = [float(position)]  # publish real values; sim will clamp if needed
+        self._sim_pub.publish(msg)
 
-            subs = self._sim_pub.get_subscription_count()
-            if subs == 0:
-                self.get_logger().warn(f"[GRIPPER SIM] published value={sim_value} but subs=0 on {self._sim_topic}")
-            else:
-                self.get_logger().info(f"[GRIPPER SIM] value={sim_value} -> {self._sim_topic} (subs={subs})")
-            return
-
-        self.get_logger().error("[GRIPPER] No backend available")
+        subs = self._sim_pub.get_subscription_count()
+        self.get_logger().info(f"[GRIPPER SIM] pub {msg.data[0]} -> {self._sim_topic} (subs={subs})")
 
     def _close_gripper_best_effort(self) -> Tuple[bool, str]:
         try:
             self._send_gripper_no_wait(self._close_pos)
-            return True, "Paused. Gripper close sent."
+            return True, "Paused. Close command sent."
         except Exception as e:
             return False, f"Pause: failed to send close: {e}"
 
-    def _freeze_best_effort(self) -> Tuple[bool, str]:
+    def _abort_best_effort(self) -> Tuple[bool, str]:
         """
-        Best-effort abort for gripper:
-        - if we have a last goal handle from the action backend, request cancel
-        - in sim topic backend, there's nothing to cancel; we just stop sending new commands
+        Abort:
+        - Set abort flag already done in service.
+        - Best-effort cancel last action goal if we were using ACTION.
         """
         backend = self._select_backend()
+        if backend != BackendMode.ACTION:
+            return True, "Abort: sim backend (no goal to cancel)."
 
-        if backend == GripperBackend.ACTION:
-            gh = None
-            with self._lock:
-                gh = self._last_goal_handle
-
-            if gh is None:
-                return True, "Abort: no active gripper goal to cancel (best-effort)."
-
-            try:
-                self.get_logger().warn("Abort: canceling last gripper goal (best-effort).")
-                gh.cancel_goal_async()
-                return True, "Abort: cancel requested for last gripper goal."
-            except Exception as e:
-                return False, f"Abort: cancel failed: {e}"
-
-        # SIM_TOPIC: nothing to cancel
-        return True, "Abort: sim backend (no goal to cancel)."
-
-    # --------------------------
-    # Pause/abort checks
-    # --------------------------
-
-    def _sleep_with_checks(self, seconds: float) -> None:
-        t0 = time.time()
-        while time.time() - t0 < seconds:
-            self._check_abort_or_pause()
-            time.sleep(0.05)
-
-    def _check_abort_or_pause(self) -> None:
+        gh = None
         with self._lock:
-            abort = self._abort_requested
-            paused = self._paused
+            gh = self._last_goal_handle
 
-        if abort:
-            self._freeze_best_effort()
-            raise RuntimeError("Aborted")
+        if gh is None:
+            return True, "Abort: no active gripper goal to cancel (best-effort)."
 
-        # Pause loop
-        while paused:
-            time.sleep(0.05)
+        try:
+            self.get_logger().warn("Abort: canceling last gripper goal (best-effort).")
+            gh.cancel_goal_async()
+            return True, "Abort: cancel requested."
+        except Exception as e:
+            return False, f"Abort: cancel failed: {e}"
+
+    # --------------------------
+    # Pause / abort helpers
+    # --------------------------
+    def _sleep_with_checks(self, seconds: float, check_dt: float = 0.05):
+        """
+        Sleeps for `seconds` while:
+          - abort stops immediately
+          - pause blocks time (pause time does not consume the remaining time)
+        """
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            with self._lock:
+                abort = self._abort_requested
+                paused = self._paused
+
+            if abort:
+                raise RuntimeError("aborted")
+
+            if paused:
+                # Wait until resume or abort (pause time should not consume remaining time)
+                remaining = end - time.monotonic()
+                while True:
+                    time.sleep(check_dt)
+                    with self._lock:
+                        abort = self._abort_requested
+                        paused = self._paused
+                    if abort:
+                        raise RuntimeError("aborted")
+                    if not paused:
+                        break
+                end = time.monotonic() + max(0.0, remaining)
+            else:
+                time.sleep(check_dt)
+
+    def _check_abort_or_pause(self, check_dt: float = 0.05):
+        """
+        Blocks while paused. Aborts immediately if abort is requested.
+        """
+        while True:
             with self._lock:
                 abort = self._abort_requested
                 paused = self._paused
             if abort:
-                self._freeze_best_effort()
-                raise RuntimeError("Aborted while paused")
+                raise RuntimeError("aborted")
+            if not paused:
+                return
+            time.sleep(check_dt)
 
 
 def main(args=None):

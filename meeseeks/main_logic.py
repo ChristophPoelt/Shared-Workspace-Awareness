@@ -10,7 +10,6 @@ from std_srvs.srv import Trigger
 from meeseeks.targetSelection import selectNewTarget
 import meeseeks.globalVariables as gv
 
-
 class GestureController:
     """Wrapper around RobotGestures Trigger services."""
 
@@ -69,6 +68,7 @@ class MainLogic(Node):
         super().__init__("main_logic")
 
         self.cb_group = ReentrantCallbackGroup()
+        self.target_pub = self.create_publisher(String, "/selected_target", 10)
 
         # ─── State tracking ────────────────────────────────────────────────
         self.current_carriage_pos = None
@@ -245,6 +245,11 @@ class MainLogic(Node):
 
             # Force-update global, even if selectNewTarget() only returns a value
             gv.currentTargetGlobal = target
+            
+            msg = String()
+            msg.data = target
+            self.target_pub.publish(msg)
+            self.get_logger().info(f"Published /selected_target: {target}")
             self.get_logger().info(f"Selected target: {target}")
 
         except Exception as e:
