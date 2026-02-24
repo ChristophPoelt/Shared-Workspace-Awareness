@@ -59,13 +59,12 @@ def generate_launch_description():
             output="screen",
         ),
 
-        # --- Robot initialization: real only (if needed) ---
+        # --- Robot initialization: both only (if needed) ---
         Node(
             package="meeseeks",
             executable="robot_initialization",
             name="robot_initialization",
             output="screen",
-            condition=is_real,
         ),
 
         # --- Dummy carriage only in demo (because sim doesn't publish it) ---
