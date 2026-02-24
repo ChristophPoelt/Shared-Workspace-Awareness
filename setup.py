@@ -27,6 +27,9 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'test_node = meeseeks.test_node:main',
+            'arm_controller = meeseeks.arm_controller:main',
+            'mock_arm = meeseeks.mock_arm_subscriber:main',
             'angle_calculation = meeseeks.angle_calculation:main',
             'globalVariables = meeseeks.globalVariables:main',
             'robot_gestures = meeseeks.robot_gestures:main',
