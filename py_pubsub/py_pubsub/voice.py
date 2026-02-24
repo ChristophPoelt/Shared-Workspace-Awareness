@@ -22,7 +22,8 @@ import ctypes
 import time
 import sys
 import os
-
+import torch
+from silero_vad import load_silero_vad, get_speech_timestamps
 
 
 # Suppress portaudio/sounddevice core dump on exit
@@ -45,7 +46,22 @@ audio_queue = queue.Queue()
 stop_event = threading.Event()
 status_lock = threading.Lock()
 current_status = "Listening..."
-transcription_queue = queue.Queue()
+
+class MinimalPublisher(Node):
+
+   def __init__(self):
+      super().__init__('publisher')
+      self.publisher_ = self.create_publisher(String, 'topic', 10)
+      timer_period = 0.5  # seconds
+      self.timer_ = self.create_timer(timer_period, self.timer_callback)
+      self.count_ = 0
+
+   def timer_callback(self):
+      msg = String()
+      msg.data = 'Hello World: %d' % self.count_
+      self.publisher_.publish(msg)
+      self.get_logger().info('Publishing: "%s"' % msg.data)
+      self.count_ += 1
 
 # ─── Status display ───────────────────────────────────────────────────────────
 
@@ -178,8 +194,6 @@ def handle_transcription(text: str, elapsed: float):
         print("point to target command recognized. maybe\n")
     elif "stop" in text_lower:
         print("abort command recognized\n")
-    
-    transcription_queue.put(text)
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
@@ -216,5 +230,15 @@ def main():
         t_status.join(timeout=2)
         print("Stopped cleanly.")
 
+def main2(args=None):
+   rclpy.init(args=args)
+
+   minimal_publisher = MinimalPublisher()
+
+   rclpy.spin(minimal_publisher)
+
+   minimal_publisher.destroy_node()
+   rclpy.shutdown()
+
 if __name__ == "__main__":
-    main()
+    main2()
