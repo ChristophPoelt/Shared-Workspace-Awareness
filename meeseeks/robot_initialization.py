@@ -45,7 +45,7 @@ class RobotInitializationNode(Node):
         ]
 
         point = JointTrajectoryPoint()
-        point.positions = [0.0, 0.0, 1.5708, 0.0, 0.0, 0.0]
+        point.positions = [0.09568, -0.64045, -0.85659, -0.15044, -1.3406, -1.52521]
         point.time_from_start.sec = 5
 
         traj.points.append(point)
