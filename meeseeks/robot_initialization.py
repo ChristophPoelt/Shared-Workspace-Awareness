@@ -51,9 +51,9 @@ class RobotInitializationNode(Node):
         traj.points.append(point)
         self.traj_pub.publish(traj)
 
-        carriage_msg = Float32()
-        carriage_msg.data = 0.0
-        self.carriage_pub.publish(carriage_msg)
+        # carriage_msg = Float32()
+        # carriage_msg.data = 0.0
+        # self.carriage_pub.publish(carriage_msg)
 
         response.success = True
         response.message = "Robot moved to initial pose"
