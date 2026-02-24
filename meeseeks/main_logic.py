@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
+import threading
+import time
+
 import rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
 from std_msgs.msg import String, Float64
 from std_srvs.srv import Trigger
@@ -68,12 +72,27 @@ class MainLogic(Node):
         super().__init__("main_logic")
 
         self.cb_group = ReentrantCallbackGroup()
+        state_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
         self.target_pub = self.create_publisher(String, "/selected_target", 10)
+        self.control_state_pub = self.create_publisher(String, "/robot_control_state", state_qos)
 
         # ─── State tracking ────────────────────────────────────────────────
         self.current_carriage_pos = None
         self.target_position_threshold = 0.15  # meters
-        self.state = "initializing"  # initializing, ready, paused, aborting
+        self.state = "initializing"  # initializing, waiting_*, ready(moving), paused, aborted
+        self._state_lock = threading.RLock()
+        self.pre_move_wait_s = 15.0
+        self.post_reach_wait_s = 15.0
+        self.pause_wait_s = 30.0
+        self._state_deadline = None
+        self._resume_state_after_pause = None
+        self._resume_state_after_abort = None
+        self._suspended_deadline_remaining = None
+        self._publish_control_state()
 
         # Service client for robot initialization (Franzi)
         self.robot_init_client = self.create_client(
@@ -110,18 +129,9 @@ class MainLogic(Node):
         # ----- Init sequence -----
         self._initial_pose()
 
-        # Select initial target + update global
-        self._select_new_target_safe(initial=True)
-        self.get_logger().info(f"Initial target selected: {gv.currentTargetGlobal}")
-
-        # Target selected gesture
-        self.gesture.target_selected()
-
-        # Target indication gesture (pointing handled elsewhere)
-        self._target_indication()
-
-        self.state = "ready"
-        self.get_logger().info("Initialization complete. Robot ready.")
+        # Select initial target and start the pre-movement waiting phase.
+        self._start_target_cycle(initial=True)
+        self.get_logger().info("Initialization complete. Workflow started.")
 
         # Main loop timer
         self.control_timer = self.create_timer(
@@ -151,37 +161,64 @@ class MainLogic(Node):
             self.get_logger().warn(f"Unknown voice command: '{raw}'")
 
     def abort_command_logic(self) -> None:
-        self.get_logger().info("ABORT: Stopping all operations")
-        self.state = "aborting"
-        self.gesture.abort()
-        self.get_logger().info("Robot aborted and frozen")
-        self.state = "ready"
+        with self._state_lock:
+            self.get_logger().info("ABORT: Stopping all operations")
+            if self.state == "aborted":
+                self.get_logger().warn("Robot is already aborted; waiting for continue")
+                return
+
+            self._resume_state_after_abort = self.state
+            self._suspended_deadline_remaining = self._remaining_deadline_seconds()
+            self._state_deadline = None
+            self._set_state("aborted")
+            self.gesture.abort()
+            self.get_logger().info("Robot aborted and frozen (waiting for continue command)")
 
     def pause_command_logic(self) -> None:
-        self.get_logger().info("PAUSE: Pausing robot movement")
-        if self.state == "ready":
-            self.state = "paused"
-            self.gesture.pause()
-            self.get_logger().info("Robot paused")
-        else:
-            self.get_logger().warn(f"Cannot pause in state: {self.state}")
+        with self._state_lock:
+            self.get_logger().info("PAUSE: Pausing robot movement")
+            if self.state in ("waiting_before_move", "ready", "waiting_after_reach"):
+                self._resume_state_after_pause = self.state
+                # Pause freezes the workflow timer; resume behavior is handled in main loop.
+                self._suspended_deadline_remaining = self._remaining_deadline_seconds()
+                self._state_deadline = time.monotonic() + self.pause_wait_s
+                self._set_state("paused")
+                self.gesture.pause()
+                self.get_logger().info(
+                    f"Robot paused for up to {self.pause_wait_s:.0f}s "
+                    "(movement will reinitiate automatically)"
+                )
+            else:
+                self.get_logger().warn(f"Cannot pause in state: {self.state}")
 
     def where_are_you_going_logic(self) -> None:
-        self.get_logger().info("WHERE ARE YOU GOING?")
-        self.get_logger().info(f"  Current target: {gv.currentTargetGlobal}")
-        if self.current_carriage_pos is not None:
-            self.get_logger().info(f"  Current position: {self.current_carriage_pos:.3f}")
-        else:
-            self.get_logger().info("  Current position: unknown (no data yet)")
+        with self._state_lock:
+            self.get_logger().info("WHERE ARE YOU GOING?")
+            self.get_logger().info(f"  Current target: {gv.currentTargetGlobal}")
+            if self.current_carriage_pos is not None:
+                self.get_logger().info(f"  Current position: {self.current_carriage_pos:.3f}")
+            else:
+                self.get_logger().info("  Current position: unknown (no data yet)")
+
+            # User workflow: asking this during the pre-move wait starts movement immediately.
+            if self.state == "waiting_before_move":
+                self.get_logger().info(
+                    "WHERE-ARE-YOU-GOING command received during waiting period -> starting movement now"
+                )
+                self._begin_movement_to_current_target()
 
     def continue_logic(self) -> None:
-        self.get_logger().info("CONTINUE: Resuming robot movement")
-        if self.state == "paused":
-            self.state = "ready"
-            self.gesture.resume()
-            self.get_logger().info("Robot resumed")
-        else:
-            self.get_logger().warn(f"Nothing to resume (state: {self.state})")
+        with self._state_lock:
+            self.get_logger().info("CONTINUE: Resuming robot movement")
+            if self.state == "paused":
+                self._resume_from_pause(auto=False)
+                self.gesture.resume()
+                self.get_logger().info("Robot resumed")
+            elif self.state == "aborted":
+                self._resume_from_abort()
+                self.get_logger().info("Robot continued after abort")
+            else:
+                self.get_logger().warn(f"Nothing to resume (state: {self.state})")
 
     # -------------------------
     # Main control loop
@@ -190,21 +227,40 @@ class MainLogic(Node):
         self.current_carriage_pos = msg.data
 
     def main_control_loop(self) -> None:
-        if self.state != "ready":
-            return
+        with self._state_lock:
+            if self.state == "paused":
+                if self._state_deadline is not None and time.monotonic() >= self._state_deadline:
+                    self.get_logger().info("Pause timeout elapsed -> reinitiating workflow/movement")
+                    self._resume_from_pause(auto=True)
+                    self.gesture.resume()
+                return
 
-        if not self._is_target_reached():
-            return
+            if self.state == "aborted":
+                return
 
-        self.get_logger().warn("=" * 60)
-        self.get_logger().warn("TARGET REACHED!")
-        self.get_logger().warn("=" * 60)
+            if self.state == "waiting_before_move":
+                if self._state_deadline is not None and time.monotonic() >= self._state_deadline:
+                    self.get_logger().info("Pre-movement waiting period finished -> starting movement")
+                    self._begin_movement_to_current_target()
+                return
 
-        self._select_new_target_safe(initial=False)
-        self.get_logger().info(f"New target selected: {gv.currentTargetGlobal}")
+            if self.state == "waiting_after_reach":
+                if self._state_deadline is not None and time.monotonic() >= self._state_deadline:
+                    self.get_logger().info("Post-reach waiting period finished -> selecting new target")
+                    self._start_target_cycle(initial=False)
+                return
 
-        self.gesture.target_selected()
-        self._target_indication()
+            if self.state != "ready":
+                return
+
+            if not self._is_target_reached():
+                return
+
+            self.get_logger().warn("=" * 60)
+            self.get_logger().warn("TARGET REACHED!")
+            self.get_logger().warn("=" * 60)
+
+            self._enter_post_reach_wait()
 
     # ─── Target Reach Detection ────────────────────────────────────────────
     def _is_target_reached(self) -> bool:
@@ -288,6 +344,99 @@ class MainLogic(Node):
         self.get_logger().info(
             "Pointing gesture is handled by the separate pointing_to_target_logic node"
         )
+
+    def _publish_control_state(self) -> None:
+        msg = String()
+        msg.data = self.state
+        self.control_state_pub.publish(msg)
+
+    def _set_state(self, new_state: str) -> None:
+        if self.state == new_state:
+            return
+        self.state = new_state
+        self._publish_control_state()
+
+    def _remaining_deadline_seconds(self):
+        if self._state_deadline is None:
+            return None
+        return max(0.0, self._state_deadline - time.monotonic())
+
+    def _start_target_cycle(self, initial: bool) -> None:
+        self._select_new_target_safe(initial=initial)
+        if initial:
+            self.get_logger().info(f"Initial target selected: {gv.currentTargetGlobal}")
+        else:
+            self.get_logger().info(f"New target selected: {gv.currentTargetGlobal}")
+
+        # Target selected gesture, then target indication (pointing node reacts to the target topic).
+        self.gesture.target_selected()
+        self._target_indication()
+
+        self._state_deadline = time.monotonic() + self.pre_move_wait_s
+        self._set_state("waiting_before_move")
+        self.get_logger().info(
+            f"Waiting {self.pre_move_wait_s:.0f}s before moving to {gv.currentTargetGlobal}"
+        )
+
+    def _begin_movement_to_current_target(self) -> None:
+        self._state_deadline = None
+        self._set_state("ready")
+        self.get_logger().info(f"Moving toward target: {gv.currentTargetGlobal}")
+
+    def _enter_post_reach_wait(self) -> None:
+        self._state_deadline = time.monotonic() + self.post_reach_wait_s
+        self._set_state("waiting_after_reach")
+        self.get_logger().info(
+            f"Waiting {self.post_reach_wait_s:.0f}s before selecting the next target"
+        )
+
+    def _resume_from_pause(self, auto: bool) -> None:
+        prev_state = self._resume_state_after_pause or "ready"
+        remaining = self._suspended_deadline_remaining
+        self._resume_state_after_pause = None
+        self._suspended_deadline_remaining = None
+        self._state_deadline = None
+
+        # Workflow requirement: after pause, reinitiate movement after 30s.
+        if prev_state in ("waiting_before_move", "ready"):
+            self._begin_movement_to_current_target()
+            if auto:
+                self.get_logger().info("Pause timeout complete -> movement reinitiated")
+            return
+
+        if prev_state == "waiting_after_reach":
+            self._set_state("waiting_after_reach")
+            if remaining is not None:
+                self._state_deadline = time.monotonic() + remaining
+            else:
+                self._state_deadline = time.monotonic() + self.post_reach_wait_s
+            return
+
+        self._set_state("ready")
+
+    def _resume_from_abort(self) -> None:
+        prev_state = self._resume_state_after_abort or "ready"
+        remaining = self._suspended_deadline_remaining
+        self._resume_state_after_abort = None
+        self._suspended_deadline_remaining = None
+
+        if prev_state == "paused":
+            # Continue from an aborted-pause scenario as active movement.
+            self._state_deadline = None
+            self._begin_movement_to_current_target()
+            return
+
+        if prev_state in ("waiting_before_move", "waiting_after_reach"):
+            self._set_state(prev_state)
+            if remaining is not None:
+                self._state_deadline = time.monotonic() + remaining
+            else:
+                wait_s = self.pre_move_wait_s if prev_state == "waiting_before_move" else self.post_reach_wait_s
+                self._state_deadline = time.monotonic() + wait_s
+            return
+
+        self._state_deadline = None
+        self._set_state("ready")
 
 
 def main(args=None):

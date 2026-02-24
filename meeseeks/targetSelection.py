@@ -1,7 +1,4 @@
 import random
-# from globalVariables import currentTargetGlobal #not sure this line is necessary
-# Shiyi: sorry franzi, ich brauch diese Import zu ändern, sonder wird Lauch ein Crash bekommen.
-from . import globalVariables as gv
 
 TARGETS = ["position0", "position1", "position2"]
 
@@ -9,7 +6,7 @@ def selectNewTarget(currentTarget: str | None) -> str:
     """
     Select a random target different from the current one.
     If currentTarget is None, select any target.
-    Also updates the global variable currentTargetGlobal.
+    Returns the chosen target; callers decide when/how to publish or persist it.
     """
     if currentTarget is None:
         new_target = random.choice(TARGETS)
@@ -18,9 +15,6 @@ def selectNewTarget(currentTarget: str | None) -> str:
             raise ValueError(f"Unknown current target: {currentTarget}")
         available_targets = [t for t in TARGETS if t != currentTarget]
         new_target = random.choice(available_targets)
-
-    # Update the global variable in another module
-    gv.currentTargetGlobal = new_target
 
     return new_target
 

@@ -2,9 +2,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, TimerAction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
-from launch.actions import ExecuteProcess   
-from launch_ros.actions import Node         
-from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 
 
 
@@ -12,8 +10,6 @@ def generate_launch_description():
     demo = LaunchConfiguration("demo")
     spawn_gripper_controller = LaunchConfiguration("spawn_gripper_controller")
     controller_manager = LaunchConfiguration("controller_manager")
-    voice_python = LaunchConfiguration("voice_python") # initialize within generate launch description
-
     is_demo = IfCondition(PythonExpression(["'", demo, "' == 'true'"]))
     is_real = IfCondition(PythonExpression(["'", demo, "' == 'false'"]))
 
@@ -28,14 +24,10 @@ def generate_launch_description():
     transcriber = TimerAction(
         period=5.0,  # delay to let ROS 2 and other nodes come up first
         actions=[
-            ExecuteProcess(
-                cmd=[
-                    voice_python,
-                    "-m",
-                    "meeseeks.transcriber",
-                    "--ros-args",
-                    "-r", "__node:=transcriber",
-                ],
+            Node(
+                package="meeseeks",
+                executable="transcriber",
+                name="transcriber",
                 output="screen",
                 respawn=True,           # restart if it crashes
                 respawn_delay=3.0,      # wait 3s before restarting
@@ -59,12 +51,6 @@ def generate_launch_description():
             default_value="/controller_manager",
             description="Controller manager node name (change if namespaced)",
         ),
-        DeclareLaunchArgument(
-            "voice_python",
-            default_value="python3",
-            description="Python executable used to run the transcriber (e.g., /path/to/venv/bin/python3).",
-        ),
-
         # --- Always run gestures (so you can test them) ---
         Node(
             package="meeseeks",
