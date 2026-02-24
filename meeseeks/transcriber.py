@@ -20,6 +20,7 @@ MODEL_SIZE = "base"       # tiny / base
 LOG_PROB_THRESHOLD = -2.0  # secondary filter for low-confidence transcriptions
 VAD_THRESHOLD = 0.5        # silero VAD sensitivity (0-1, higher = stricter)
 SUPPRESS_STDERR = False    # set True on hardware that emits noisy backend warnings
+VOICE_COMMAND_TOPIC_DEFAULT = "/voice_commands"
 
 
 def _suppress_c_stderr():
@@ -71,7 +72,11 @@ def _load_voice_dependencies():
 class TranscriberNode(Node):
     def __init__(self):
         super().__init__("transcriber")
-        self.voice_pub = self.create_publisher(String, "/voice_commands", 10)
+        self.declare_parameter("voice_command_topic", VOICE_COMMAND_TOPIC_DEFAULT)
+        self.voice_command_topic = str(
+            self.get_parameter("voice_command_topic").value or VOICE_COMMAND_TOPIC_DEFAULT
+        )
+        self.voice_pub = self.create_publisher(String, self.voice_command_topic, 10)
 
         self.audio_queue = queue.Queue()
         self.stop_event = threading.Event()
@@ -243,7 +248,9 @@ class TranscriberNode(Node):
             self.get_logger().error(str(exc))
             return 1
 
-        self.get_logger().info("Ready. Listening... (Ctrl+C to stop)")
+        self.get_logger().info(
+            f"Ready. Listening... (Ctrl+C to stop) Publishing transcriptions to {self.voice_command_topic}"
+        )
 
         self._t_transcribe = threading.Thread(target=self.transcription_worker, daemon=True)
         self._t_status = threading.Thread(target=self.status_worker, daemon=True)

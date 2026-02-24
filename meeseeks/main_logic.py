@@ -14,6 +14,8 @@ from std_srvs.srv import Trigger
 from meeseeks.targetSelection import selectNewTarget
 import meeseeks.globalVariables as gv
 
+VOICE_COMMAND_TOPIC_DEFAULT = "/voice_commands"
+
 class GestureController:
     """Wrapper around RobotGestures Trigger services."""
 
@@ -79,9 +81,17 @@ class MainLogic(Node):
         )
         self.target_pub = self.create_publisher(String, "/selected_target", 10)
         self.control_state_pub = self.create_publisher(String, "/robot_control_state", state_qos)
+        self.declare_parameter("voice_command_topic", VOICE_COMMAND_TOPIC_DEFAULT)
+        self.voice_command_topic = str(
+            self.get_parameter("voice_command_topic").value or VOICE_COMMAND_TOPIC_DEFAULT
+        )
+        self.declare_parameter("pointing_only_mode", True)
+        self.pointing_only_mode = bool(self.get_parameter("pointing_only_mode").value)
 
         # ─── State tracking ────────────────────────────────────────────────
         self.current_carriage_pos = None
+        self._no_carriage_feedback_logged = False
+        self._pointing_only_reach_logged = False
         self.target_position_threshold = 0.15  # meters
         self.state = "initializing"  # initializing, waiting_*, ready(moving), paused, aborted
         self._state_lock = threading.RLock()
@@ -113,7 +123,7 @@ class MainLogic(Node):
         # Voice command subscription
         self.create_subscription(
             String,
-            "/voice_commands",
+            self.voice_command_topic,
             self._on_voice_command,
             10,
             callback_group=self.cb_group,
@@ -123,7 +133,16 @@ class MainLogic(Node):
         self.gesture = GestureController(self, self.cb_group)
 
         self.get_logger().info("=" * 60)
-        self.get_logger().info("MainLogic Node Starting (manual voice input via /voice_commands)")
+        self.get_logger().info(
+            f"MainLogic Node Starting (subscribing for voice commands on {self.voice_command_topic})"
+        )
+        self.get_logger().info(
+            "Voice input source is optional: run transcriber separately or use voice_cli_publisher manually."
+        )
+        if self.pointing_only_mode:
+            self.get_logger().info(
+                "Pointing-only mode enabled in main_logic: carriage reach detection is disabled."
+            )
         self.get_logger().info("=" * 60)
 
         # ----- Init sequence -----
@@ -264,8 +283,22 @@ class MainLogic(Node):
 
     # ─── Target Reach Detection ────────────────────────────────────────────
     def _is_target_reached(self) -> bool:
+        if self.pointing_only_mode:
+            if not self._pointing_only_reach_logged:
+                self.get_logger().info(
+                    "Pointing-only mode: treating targets as reached without carriage movement."
+                )
+                self._pointing_only_reach_logged = True
+            return True
+
         if self.current_carriage_pos is None:
-            return False
+            if not self._no_carriage_feedback_logged:
+                self.get_logger().warn(
+                    "No carriage feedback available; running in pointing-only mode "
+                    "(treating targets as immediately reached)"
+                )
+                self._no_carriage_feedback_logged = True
+            return True
 
         TARGET_POSITIONS = {
             "position0": 2.7,
@@ -381,7 +414,7 @@ class MainLogic(Node):
     def _begin_movement_to_current_target(self) -> None:
         self._state_deadline = None
         self._set_state("ready")
-        self.get_logger().info(f"Moving toward target: {gv.currentTargetGlobal}")
+        self.get_logger().info(f"Pointing toward target (no carriage move): {gv.currentTargetGlobal}")
 
     def _enter_post_reach_wait(self) -> None:
         self._state_deadline = time.monotonic() + self.post_reach_wait_s

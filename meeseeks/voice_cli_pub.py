@@ -4,6 +4,8 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
+VOICE_COMMAND_TOPIC_DEFAULT = "/voice_commands"
+
 
 HELP = """\
 Type a command and press Enter, e.g.:
@@ -22,8 +24,15 @@ Other:
 class VoiceCliPublisher(Node):
     def __init__(self):
         super().__init__("voice_cli_publisher")
-        self.pub = self.create_publisher(String, "/voice_commands", 10)
-        self.get_logger().info("Voice CLI Publisher started. Publishing to /voice_commands")
+        self.declare_parameter("voice_command_topic", VOICE_COMMAND_TOPIC_DEFAULT)
+        self.voice_command_topic = str(
+            self.get_parameter("voice_command_topic").value or VOICE_COMMAND_TOPIC_DEFAULT
+        )
+        self.pub = self.create_publisher(String, self.voice_command_topic, 10)
+        self.get_logger().info(
+            f"Voice CLI Publisher started. Publishing to {self.voice_command_topic}"
+        )
+        self.get_logger().info("Use this as manual fallback when transcriber is not running.")
         self.get_logger().info(HELP)
 
     def publish_text(self, text: str):

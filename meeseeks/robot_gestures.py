@@ -52,7 +52,8 @@ class RobotGestures(Node):
         self.declare_parameter("sim_gripper_topic", "/gripper_controller/commands")
 
         # Gesture timing
-        self.declare_parameter("pause_s", 0.5)
+        # Longer dwell so sim gripper motion is visible between sequence steps.
+        self.declare_parameter("pause_s", 1.0)
 
         # Read parameters
         backend_str = str(self.get_parameter("backend").value).strip().lower()
@@ -78,21 +79,14 @@ class RobotGestures(Node):
 
         self._last_goal_handle: Optional[ClientGoalHandle] = None
 
-        # Create QoS profile with BEST_EFFORT reliability
-        qos = QoSProfile(depth=10)
-        qos.reliability = ReliabilityPolicy.BEST_EFFORT
-        qos.durability = DurabilityPolicy.VOLATILE
-        
-        self._sim_pub = self.create_publisher(Float64MultiArray, self._sim_topic, qos)
-
         # --------------------------
         # Gripper interfaces
         # --------------------------
         self._gripper_client = ActionClient(self, GripperCommand, self._action_name)
 
-        # Match ros2_control subscriber QoS (often BEST_EFFORT)
-        qos = QoSProfile(depth=10)
-        qos.reliability = ReliabilityPolicy.BEST_EFFORT
+        # Match gripper controller subscriber QoS (RELIABLE + VOLATILE).
+        qos = QoSProfile(depth=1)
+        qos.reliability = ReliabilityPolicy.RELIABLE
         qos.durability = DurabilityPolicy.VOLATILE
         self._sim_pub = self.create_publisher(Float64MultiArray, self._sim_topic, qos)
 

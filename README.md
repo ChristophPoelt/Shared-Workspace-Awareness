@@ -43,3 +43,19 @@ ros2 launch meeseeks bringup.launch.py demo:=true
 ros2 launch meeseeks bringup.launch.py demo:=true spawn_gripper_controller:=false
 ## If your controller_manager is namespaced (rare, but possible)
 ros2 launch meeseeks bringup.launch.py demo:=true controller_manager:=/my_ns/controller_manager
+
+## Run transcriber or voice_cli_publisher in separate Terminal
+colcon build --packages-select meeseeks [--symlink-install]
+source install/setup.bash
+
+ros2 run meeseeks transcriber
+ros2 run meeseeks voice_cli_publisher
+
+
+
+## Set spawner works manually
+ros2 run controller_manager spawner gripper_controller --controller-manager /controller_manager --activate
+## check if they really spawned
+ros2 control list_controllers | grep -i gripper
+
+

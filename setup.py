@@ -37,7 +37,8 @@ setup(
             'demo_dummy_services = meeseeks.demo_dummy_services:main',
             'demo_dummy_carriage = meeseeks.demo_dummy_carriage:main',
             'voice_cli_publisher = meeseeks.voice_cli_pub:main',
-            'transcriber = meeseeks.transcriber:main'
+            'transcriber = meeseeks.transcriber:main',
+            "gripper_action_adapter = meeseeks.gripper_action_adapter:main",
         ],
     },
 )
