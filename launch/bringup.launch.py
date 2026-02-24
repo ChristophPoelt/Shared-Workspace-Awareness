@@ -109,5 +109,5 @@ def generate_launch_description():
             name="pointing_to_target",
             output="screen",
         ),
-        transcriber,
+        #transcriber,
     ])
