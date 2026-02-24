@@ -63,7 +63,7 @@ class MainLogic(Node):
         cmd = msg.data.lower()
         self.get_logger().info(f"\n[VOICE-COMMAND] >>> {cmd.upper()} <<<")
         
-        if any(x in cmd for x in ["abort", "stop"]):
+        if "abort" in cmd:
             self._handle_abort()
         elif "pause" in cmd:
             self._handle_pause()
