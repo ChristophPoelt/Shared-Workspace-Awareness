@@ -20,7 +20,7 @@ TARGET_POSITIONS = {
 }
 
 ARM_JOINT_NAMES = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
-FOLDED = [0.0, 0.0, 0.0, 0.0, 1.5, 1.5]  # full 6 joints, joint_1 overridden
+FOLDED = [0.002, -1.1, -1.38, -0.06, -1.38, -1.55]  # full 6 joints, joint_1 overridden
 STRETCHED = [0.0, -0.5, 0.30, 0.0, 1.10, 1.5]  # full 6 joints, joint_1 overridden
 
 
