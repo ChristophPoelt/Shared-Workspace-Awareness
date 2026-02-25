@@ -70,10 +70,10 @@ def main(args=None):
     # )
     # time.sleep(12)
 
-    node.send_gripper_command(position=0.0)
+    node.send_gripper_command(position=0.8)
     time.sleep(3)
 
-    node.send_gripper_command(position=0.8)
+    node.send_gripper_command(position=0.0)
     time.sleep(3)
 
     node.destroy_node()
