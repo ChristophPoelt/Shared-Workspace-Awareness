@@ -12,7 +12,7 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 
 ARM_JOINT_NAMES = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
-INIT_POSITIONS = [0.0, 0.0, 0.0, 0.0, 1.5, 0.0]
+INIT_POSITIONS = [0.0, 0.0, 0.0, 0.0, 1.5, 1.5]
 
 
 def clamp(value: float, lo: float, hi: float) -> float:
