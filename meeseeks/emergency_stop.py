@@ -1,42 +1,67 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
+from std_msgs.msg import String
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-from std_msgs.msg import String
-import sys, termios, tty
+import sys
+import termios
+import tty
 
-class HardFreezeNode(Node):
+class EmergencyStopNode(Node):
     def __init__(self):
-        super().__init__('hard_freeze_node')
-        self.traj_pub = self.create_publisher(JointTrajectory, '/joint_trajectory_controller/joint_trajectory', 10)
-        self.voice_pub = self.create_publisher(String, '/voice_commands', 10)
-        self.js_sub = self.create_subscription(JointState, '/joint_states', self._js_cb, 10)
+        super().__init__('emergency_stop_node')
         
-        self.last_js = None
-        self.get_logger().warn('HARD FREEZE NODE: Drücke [LEERTASTE] für Not-Halt!')
+        # 1. Publisher für die Logik (damit MainLogic auf 'aborted' springt)
+        self.logic_pub = self.create_publisher(String, '/voice_commands', 10)
+        
+        # 2. Publisher für die Hardware (überschreibt laufende Bewegungen)
+        self.traj_pub = self.create_publisher(
+            JointTrajectory, 
+            '/joint_trajectory_controller/joint_trajectory', 
+            10)
+        
+        # 3. Subscriber für die aktuelle Position
+        self.js_sub = self.create_subscription(
+            JointState, 
+            '/joint_states', 
+            self._joint_state_callback, 
+            10)
+        
+        self.current_js = None
+        self.get_logger().warn('--- EMERGENCY STOP NODE READY ---')
+        self.get_logger().info('DRÜCKE [LEERTASTE] FÜR SOFORTIGEN HARD-STOP!')
 
-    def _js_cb(self, msg):
-        self.last_js = msg
+    def _joint_state_callback(self, msg):
+        """Speichert die absolut letzte bekannte Position des Roboters."""
+        self.current_js = msg
 
-    def freeze_now(self):
-        # 1. Den Logik-Status auf Abort setzen
-        msg = String()
-        msg.data = 'abort'
-        self.voice_pub.publish(msg)
-
-        # 2. Hardware-Freeze: Aktuelle Position als Ziel schicken
-        if self.last_js:
-            traj = JointTrajectory()
-            traj.joint_names = self.last_js.name
-            p = JointTrajectoryPoint()
-            p.positions = self.last_js.position
-            p.time_from_start.nanosec = 10000000 # Sofort (0.01s)
-            traj.points.append(p)
-            self.traj_pub.publish(traj)
-            self.get_logger().error('!!! HARD FREEZE: Aktuelle Position fixiert !!!')
+    def trigger_hard_stop(self):
+        # Schritt A: Logik stoppen
+        logic_msg = String()
+        logic_msg.data = 'abort'
+        self.logic_pub.publish(logic_msg)
+        
+        # Schritt B: Hardware einfrieren
+        if self.current_js:
+            stop_traj = JointTrajectory()
+            stop_traj.joint_names = self.current_js.name
+            
+            point = JointTrajectoryPoint()
+            # Wir befehlen dem Roboter die IST-Position als SOLL-Position
+            point.positions = self.current_js.position
+            # Wir geben 0 Sekunden Zeit -> Sofortiger Stopp
+            point.time_from_start.nanosec = 1 
+            
+            stop_traj.points.append(point)
+            self.traj_pub.publish(stop_traj)
+            
+            self.get_logger().error('!!! EMERGENCY STOP: Hardware eingefroren !!!')
+        else:
+            self.get_logger().error('STOP FEHLGESCHLAGEN: Keine JointStates empfangen!')
 
 def getch():
+    """Liest ein einzelnes Zeichen direkt vom Terminal."""
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
     try:
@@ -46,18 +71,28 @@ def getch():
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
     return ch
 
-def main():
-    rclpy.init()
-    node = HardFreezeNode()
+def main(args=None):
+    rclpy.init(args=args)
+    node = EmergencyStopNode()
+
     try:
         while rclpy.ok():
-            if getch() == ' ':
-                node.freeze_now()
-            rclpy.spin_once(node, timeout_sec=0.1)
+            char = getch()
+            # Leertaste (' ')
+            if char == ' ':
+                node.trigger_hard_stop()
+            # 'q' zum Beenden des Skripts
+            elif char.lower() == 'q':
+                break
+            
+            # Kurz ROS-Callbacks verarbeiten (wichtig für den JointState-Subscriber)
+            rclpy.spin_once(node, timeout_sec=0.01)
+            
     except KeyboardInterrupt:
         pass
-    node.destroy_node()
-    rclpy.shutdown()
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
