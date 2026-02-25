@@ -105,7 +105,7 @@ class ClockwiseRail:
                    0.0 = Ziel ist genau "vorne" in Fahrtrichtung.
         """
         # 1. Normalisieren und Koordinaten berechnen
-        d_curr = self._normalize(current_pos_raw)
+        d_curr = self._normalize(current_pos_raw)-8.0
         d_targ = self._normalize(target_pos_raw)
 
         px, py, rail_yaw = self._get_pose_internal(d_curr)

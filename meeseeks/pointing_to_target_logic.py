@@ -307,9 +307,14 @@ class PointJoint1Node(Node):
         target_pos = TARGET_POSITIONS[self.current_target]
 
         yaw_angle = self.rail.calculate_yaw_to_target(
-            current_pos_raw=self.current_rail_pos,
+            current_pos_raw=self.current_rail_pos-8.0,
             target_pos_raw=target_pos,
         )
+
+        current_positions = [float(name_to_position[j]) for j in ARM_JOINT_NAMES]
+        current_joint1 = current_positions[0]
+
+        yaw_cmd = current_joint1 + shortest_angle_diff(yaw_angle, current_joint1)
 
         # self.get_logger().info(
         #     f"Pointing: rail {self.current_rail_pos:.4f}, target {target_pos:.4f}, yaw {yaw_angle:.4f}"
@@ -344,7 +349,7 @@ class PointJoint1Node(Node):
 
         if self.phase == "turning":
             desired = list(current_positions)
-            desired[0] = yaw_angle
+            desired[0] = yaw_cmd
             desired[1:] = [float(v) for v in FOLDED[1:]]
             self._publish_desired_positions(desired, current_positions, yaw_angle, now)
 
@@ -368,7 +373,7 @@ class PointJoint1Node(Node):
                     self.stretch_active = False
 
             desired = list(current_positions)
-            desired[0] = yaw_angle
+            desired[0] = yaw_cmd
             for i in range(1, len(ARM_JOINT_NAMES)):
                 desired[i] = (1.0 - self.alpha) * FOLDED[i] + self.alpha * STRETCHED[i]
 
