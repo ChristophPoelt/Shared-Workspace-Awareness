@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import time
 import threading
+import os
 from enum import Enum
 from typing import Optional, Tuple
 
@@ -13,7 +14,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 from std_srvs.srv import Trigger
 from control_msgs.action import GripperCommand
-from std_msgs.msg import Float64MultiArray
+from std_msgs.msg import Float64MultiArray, String
 
 
 class BackendMode(str, Enum):
@@ -28,6 +29,7 @@ class RobotGestures(Node):
 
     Services (std_srvs/Trigger):
       - /gesture/target_selected : CLOSE -> OPEN -> CLOSE -> OPEN (fire-and-forget)
+      - /gesture/target_selected_blocking : same sequence, response returns after completion
       - /gesture/pause           : pause + close gripper
       - /gesture/resume          : resume
       - /gesture/abort           : abort + best-effort cancel of gripper goal
@@ -41,6 +43,7 @@ class RobotGestures(Node):
         # --------------------------
         self.declare_parameter("backend", BackendMode.AUTO.value)
         self.declare_parameter("server_wait_s", 0.2)
+        self.declare_parameter("follow_control_state", True)
 
         # Action backend (real robot)
         self.declare_parameter("gripper_action_name", "/robotiq_gripper_controller/gripper_cmd")
@@ -68,6 +71,7 @@ class RobotGestures(Node):
 
         self._sim_topic = str(self.get_parameter("sim_gripper_topic").value)
         self._pause_s = float(self.get_parameter("pause_s").value)
+        self._follow_control_state = bool(self.get_parameter("follow_control_state").value)
 
         # --------------------------
         # State
@@ -89,22 +93,40 @@ class RobotGestures(Node):
         qos.reliability = ReliabilityPolicy.RELIABLE
         qos.durability = DurabilityPolicy.VOLATILE
         self._sim_pub = self.create_publisher(Float64MultiArray, self._sim_topic, qos)
+        self._state_sub = None
+        if self._follow_control_state:
+            self._state_sub = self.create_subscription(
+                String, "/robot_control_state", self._on_control_state, qos
+            )
 
         # --------------------------
         # Services
         # --------------------------
         self.create_service(Trigger, "/gesture/target_selected", self._on_target_selected)
+        self.create_service(
+            Trigger, "/gesture/target_selected_blocking", self._on_target_selected_blocking
+        )
         self.create_service(Trigger, "/gesture/pause", self._on_pause)
         self.create_service(Trigger, "/gesture/resume", self._on_resume)
         self.create_service(Trigger, "/gesture/abort", self._on_abort)
+        self.create_timer(5.0, self._warn_on_duplicate_node_names)
 
         # --------------------------
         # Log startup
         # --------------------------
-        self.get_logger().info("RobotGestures ready.")
-        self.get_logger().info(f"Backend mode: {self._backend_mode.value}")
-        self.get_logger().info(f"Action: {self._action_name} (open={self._open_pos}, close={self._close_pos}, effort={self._max_effort})")
-        self.get_logger().info(f"Sim topic: {self._sim_topic}")
+        self.get_logger().info(
+            f"[INIT] node={self.get_name()} pid={os.getpid()} RobotGestures ready"
+        )
+        self.get_logger().info(f"[GESTURE] backend mode: {self._backend_mode.value}")
+        self.get_logger().info(
+            f"[GESTURE] action={self._action_name} (open={self._open_pos}, close={self._close_pos}, "
+            f"effort={self._max_effort})"
+        )
+        self.get_logger().info(f"[GESTURE] sim topic: {self._sim_topic}")
+        self.get_logger().info(
+            "[GATE] robot_gestures does not publish /robot_control_state or /arm_armed; "
+            "it consumes services and optionally follows /robot_control_state"
+        )
 
     # --------------------------
     # Backend selection
@@ -124,29 +146,80 @@ class RobotGestures(Node):
             return BackendMode.ACTION
         return BackendMode.SIM
 
+    def _warn_on_duplicate_node_names(self) -> None:
+        try:
+            names = [name for name, _ns in self.get_node_names_and_namespaces()]
+        except Exception:
+            return
+        duplicates = sum(1 for name in names if name == self.get_name())
+        if duplicates > 1:
+            self.get_logger().warn(
+                f"[INIT] duplicate node name detected: {self.get_name()} count={duplicates}. "
+                "Stop duplicate launch/CLI instances to avoid conflicting gesture behavior."
+            )
+
+    def _on_control_state(self, msg: String) -> None:
+        state = (msg.data or "").strip().lower()
+        if not state:
+            return
+        if state == "paused":
+            self.get_logger().info("[GATE] /robot_control_state=paused -> pausing gesture execution")
+            with self._lock:
+                self._paused = True
+            return
+        if state == "aborted":
+            self.get_logger().info("[GATE] /robot_control_state=aborted -> aborting gesture execution")
+            with self._lock:
+                self._abort_requested = True
+                self._paused = False
+            self._abort_best_effort()
+            return
+        if state == "ready":
+            with self._lock:
+                if self._paused:
+                    self.get_logger().info("[GATE] /robot_control_state=ready -> resuming gesture execution")
+                self._paused = False
+
     # --------------------------
     # Services
     # --------------------------
-    def _on_target_selected(self, request, response):
-        self.get_logger().info("SERVICE HIT: /gesture/target_selected")
-
+    def _begin_target_selected_sequence(self):
         with self._lock:
             if self._busy:
-                response.success = False
-                response.message = "Busy: another gesture is running."
-                return response
+                return False, "Busy: another gesture is running."
             self._busy = True
             self._paused = False
             self._abort_requested = False
+        return True, "Started: target_selected gesture."
+
+    def _on_target_selected(self, request, response):
+        self.get_logger().info("[GESTURE] service hit: /gesture/target_selected")
+        ok, msg = self._begin_target_selected_sequence()
+        if not ok:
+            response.success = False
+            response.message = msg
+            return response
 
         threading.Thread(target=self._run_target_selected_sequence, daemon=True).start()
 
         response.success = True
-        response.message = "Started: target_selected gesture."
+        response.message = msg
+        return response
+
+    def _on_target_selected_blocking(self, request, response):
+        self.get_logger().info("[GESTURE] service hit: /gesture/target_selected_blocking")
+        ok, msg = self._begin_target_selected_sequence()
+        if not ok:
+            response.success = False
+            response.message = msg
+            return response
+        ok, msg = self._run_target_selected_sequence()
+        response.success = ok
+        response.message = msg
         return response
 
     def _on_pause(self, request, response):
-        self.get_logger().info("SERVICE HIT: /gesture/pause")
+        self.get_logger().info("[GESTURE] service hit: /gesture/pause")
         with self._lock:
             self._paused = True
 
@@ -156,7 +229,7 @@ class RobotGestures(Node):
         return response
 
     def _on_resume(self, request, response):
-        self.get_logger().info("SERVICE HIT: /gesture/resume")
+        self.get_logger().info("[GESTURE] service hit: /gesture/resume")
         with self._lock:
             if not self._busy:
                 response.success = False
@@ -169,7 +242,7 @@ class RobotGestures(Node):
         return response
 
     def _on_abort(self, request, response):
-        self.get_logger().info("SERVICE HIT: /gesture/abort")
+        self.get_logger().info("[GESTURE] service hit: /gesture/abort")
         with self._lock:
             self._abort_requested = True
             self._paused = False
@@ -188,7 +261,7 @@ class RobotGestures(Node):
         Guaranteed to release busy flag.
         """
         try:
-            self.get_logger().info("Gesture: CLOSE -> OPEN -> CLOSE -> OPEN")
+            self.get_logger().info("[GESTURE] sequence: CLOSE -> OPEN -> CLOSE -> OPEN")
 
             seq = [self._close_pos, self._open_pos, self._close_pos, self._open_pos]
 
@@ -200,12 +273,15 @@ class RobotGestures(Node):
                 if i < len(seq) - 1:
                     self._sleep_with_checks(self._pause_s)
 
-            self.get_logger().info("target_selected sequence done (ends OPEN).")
+            self.get_logger().info("[RESULT] target_selected sequence done (ends OPEN)")
+            return True, "Completed: target_selected gesture."
 
         except RuntimeError as e:
-            self.get_logger().warn(f"Gesture stopped: {e}")
+            self.get_logger().warn(f"[RESULT] gesture stopped: {e}")
+            return False, f"Stopped: {e}"
         except Exception as e:
-            self.get_logger().error(f"Gesture failed: {e}")
+            self.get_logger().error(f"[RESULT] gesture failed: {e}")
+            return False, f"Failed: {e}"
         finally:
             with self._lock:
                 self._busy = False
@@ -217,7 +293,7 @@ class RobotGestures(Node):
     # --------------------------
     def _send_gripper_no_wait(self, position: float) -> None:
         backend = self._select_backend()
-        self.get_logger().info(f"[GRIPPER] backend={backend.value}, pos={position}")
+        self.get_logger().info(f"[GESTURE] backend={backend.value}, pos={position}")
 
         if backend == BackendMode.ACTION:
             if not self._gripper_client.wait_for_server(timeout_sec=self._server_wait_s):
@@ -249,7 +325,7 @@ class RobotGestures(Node):
         self._sim_pub.publish(msg)
 
         subs = self._sim_pub.get_subscription_count()
-        self.get_logger().info(f"[GRIPPER SIM] pub {msg.data[0]} -> {self._sim_topic} (subs={subs})")
+        self.get_logger().info(f"[GESTURE] sim pub {msg.data[0]} -> {self._sim_topic} (subs={subs})")
 
     def _close_gripper_best_effort(self) -> Tuple[bool, str]:
         try:
@@ -276,7 +352,7 @@ class RobotGestures(Node):
             return True, "Abort: no active gripper goal to cancel (best-effort)."
 
         try:
-            self.get_logger().warn("Abort: canceling last gripper goal (best-effort).")
+            self.get_logger().warn("[GESTURE] abort: canceling last gripper goal (best-effort)")
             gh.cancel_goal_async()
             return True, "Abort: cancel requested."
         except Exception as e:

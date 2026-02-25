@@ -13,7 +13,7 @@ Type a command and press Enter, e.g.:
   target
   pause
   continue
-  resume
+  confirm
   abort
   where are you going
 Other:

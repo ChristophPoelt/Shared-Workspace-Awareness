@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import copy
 import math
+import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -15,6 +16,7 @@ from moveit_msgs.action import MoveGroup
 from moveit_msgs.msg import Constraints, JointConstraint, MoveItErrorCodes
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float64, String
+from std_srvs.srv import Trigger
 
 from .angle_calculation import ClockwiseRail
 
@@ -27,7 +29,7 @@ TARGET_POSITIONS = {
 
 ARM_JOINT_NAMES = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
 FOLDED = [0.002, -0.8, -1.38, -0.06, -1.0, -1.55]  # full 6 joints, joint_1 overridden
-STRETCHED = [0.0, -0.5, 0.30, 0.0, 1.10, 1.5]  # full 6 joints, joint_1 overridden
+STRETCHED = [0.0, 0.5, -0.30, -0.0, -0.5, -1.55]  # full 6 joints, joint_1 overridden
 
 
 def clamp(value: float, lo: float, hi: float) -> float:
@@ -200,7 +202,7 @@ class MoveItArmBackend:
 
         self._log.info(
             f"[MOVEIT] plan+execute dispatch phase={phase} request_id={request_id} "
-            f"context={context_id} group={self._group_name}"
+            f"context={context_id} group={self._group_name} action={self._action_name}"
         )
 
         send_future = self._client.send_goal_async(
@@ -361,18 +363,18 @@ class MoveItArmBackend:
         if status == "succeeded":
             self._log.info(
                 f"[MOVEIT] success phase={phase} request_id={request_id} "
-                f"action_status={action_status} error={error_name}"
+                f"action_status={action_status} error={error_name} error_code={int(error_code)}"
             )
         elif status == "canceled":
             self._log.info(
                 f"[MOVEIT] canceled phase={phase} request_id={request_id} "
-                f"action_status={action_status} error={error_name}"
+                f"action_status={action_status} error={error_name} error_code={int(error_code)}"
                 + (f" detail={detail}" if detail else "")
             )
         else:
             self._log.warn(
                 f"[MOVEIT] failure phase={phase} request_id={request_id} "
-                f"action_status={action_status} error={error_name}"
+                f"action_status={action_status} error={error_name} error_code={int(error_code)}"
                 + (f" detail={detail}" if detail else "")
             )
 
@@ -416,6 +418,9 @@ class PointJoint1Node(Node):
         self.declare_parameter("moveit_replan_delay_s", 0.0)
         self.declare_parameter("constrain_joint1_during_stretching", True)
         self.declare_parameter("stretch_joint1_path_tolerance_rad", 0.10)
+        self.declare_parameter("demo_auto_ready", False)
+        self.declare_parameter("demo_auto_armed", False)
+        self.declare_parameter("demo_override_grace_s", 1.0)
 
         state_qos = QoSProfile(
             depth=1,
@@ -447,11 +452,13 @@ class PointJoint1Node(Node):
         )
 
         self.current_target = None
-        self.create_subscription(String, "/selected_target", self._on_target, target_qos)
+        self._target_sub = self.create_subscription(String, "/selected_target", self._on_target, target_qos)
         self.control_state = "initializing"
-        self.create_subscription(String, "/robot_control_state", self._on_control_state, state_qos)
+        self._control_state_sub = self.create_subscription(
+            String, "/robot_control_state", self._on_control_state, state_qos
+        )
         self.arm_armed = False
-        self.create_subscription(Bool, "/arm_armed", self._on_arm_armed, state_qos)
+        self._arm_armed_sub = self.create_subscription(Bool, "/arm_armed", self._on_arm_armed, state_qos)
 
         self.current_joint_state = None
         self.current_rail_pos = self.fixed_rail_pos
@@ -470,11 +477,26 @@ class PointJoint1Node(Node):
         self.create_subscription(Float64, "/elmo/id1/carriage/position/get", self.carriage_pos_cb, 10)
 
         self.moveit_group_name = str(self.get_parameter("moveit_group_name").value).strip() or "manipulator"
+        if self.moveit_group_name == "arm":
+            self.get_logger().warn(
+                "[MOVEIT] moveit_group_name='arm' is invalid for this config; overriding to 'manipulator'"
+            )
+            self.moveit_group_name = "manipulator"
+        self.moveit_action_name = str(self.get_parameter("moveit_action_name").value).strip() or "/move_action"
+        self.demo_auto_ready = bool(self.get_parameter("demo_auto_ready").value)
+        self.demo_auto_armed = bool(self.get_parameter("demo_auto_armed").value)
+        self.demo_override_grace_s = self._nonnegative_param("demo_override_grace_s", 1.0)
+        self._started_at_s = self.get_clock().now().nanoseconds * 1e-9
+        self._demo_override_logged = set()
+        self._last_blocked_reason = None
+        self._last_blocked_log_s = 0.0
+        self._blocked_log_repeat_s = 10.0
+        self._gesture_target_selected_cli = self.create_client(Trigger, "/gesture/target_selected")
 
         self.arm_backend = MoveItArmBackend(
             self,
             group_name=self.moveit_group_name,
-            action_name=str(self.get_parameter("moveit_action_name").value),
+            action_name=self.moveit_action_name,
             server_wait_s=self._nonnegative_param("moveit_server_wait_s", 0.2),
             allowed_planning_time_s=self._positive_param("moveit_allowed_planning_time_s", 2.0),
             num_planning_attempts=int(self.get_parameter("moveit_num_planning_attempts").value),
@@ -499,7 +521,9 @@ class PointJoint1Node(Node):
         )
 
         self.create_timer(self.command_period_s, self.update_joint1)
+        self.create_timer(5.0, self._warn_on_duplicate_node_names)
         self.get_logger().info(
+            f"[INIT] node={self.get_name()} pid={os.getpid()} "
             f"Pointing mode (MoveIt backend) enabled with fixed carriage fallback: {self.fixed_rail_pos:.3f}"
         )
         self.get_logger().info(
@@ -510,9 +534,15 @@ class PointJoint1Node(Node):
             f"fold_tol={self.fold_tolerance_rad:.4f} rad"
         )
         self.get_logger().info(
-            f"MoveIt group={self.moveit_group_name} "
+            f"[MOVEIT] startup group={self.moveit_group_name} action={self.moveit_action_name} "
             f"(joint goal constraints use {ARM_JOINT_NAMES})"
         )
+        if self.demo_auto_ready or self.demo_auto_armed:
+            self.get_logger().warn(
+                "[GATE] demo override enabled "
+                f"(demo_auto_ready={self.demo_auto_ready}, demo_auto_armed={self.demo_auto_armed}, "
+                f"grace={self.demo_override_grace_s:.1f}s)"
+            )
 
     def _positive_param(self, name: str, default: float) -> float:
         value = float(self.get_parameter(name).value)
@@ -556,6 +586,43 @@ class PointJoint1Node(Node):
             f"[SEQUENCE] generation={self._sequence_generation} ({reason})"
         )
 
+    def _warn_on_duplicate_node_names(self) -> None:
+        try:
+            names = [name for name, _ns in self.get_node_names_and_namespaces()]
+        except Exception:
+            return
+        duplicates = sum(1 for name in names if name == self.get_name())
+        if duplicates > 1:
+            self.get_logger().warn(
+                f"[INIT] duplicate node name detected: {self.get_name()} count={duplicates}. "
+                "If using wrappers/launch + standalone CLI, ensure only one instance is running."
+            )
+
+    def _call_trigger_async(self, client, label: str) -> None:
+        if not client.service_is_ready():
+            if not client.wait_for_service(timeout_sec=0.5):
+                self.get_logger().warn(f"[GESTURE] service not available: {label}")
+                return
+        future = client.call_async(Trigger.Request())
+
+        def _done_cb(fut):
+            try:
+                resp = fut.result()
+                if resp and resp.success:
+                    self.get_logger().info(f"[GESTURE] {label}: OK ({resp.message})")
+                elif resp:
+                    self.get_logger().warn(f"[GESTURE] {label}: FAIL ({resp.message})")
+                else:
+                    self.get_logger().warn(f"[GESTURE] {label}: no response")
+            except Exception as exc:
+                self.get_logger().error(f"[GESTURE] {label}: exception: {exc}")
+
+        future.add_done_callback(_done_cb)
+
+    def _trigger_post_stretch_gesture(self, reason: str) -> None:
+        self.get_logger().info(f"[GESTURE] triggering post-stretch target_selected ({reason})")
+        self._call_trigger_async(self._gesture_target_selected_cli, "/gesture/target_selected")
+
     def _request_stop(self, reason: str) -> None:
         self.arm_backend.stop(reason)
         self._last_sent_yaw = None
@@ -568,7 +635,7 @@ class PointJoint1Node(Node):
         self._bump_sequence_generation(f"target={self.current_target}")
         self._request_stop("target change")
         self._set_phase("folding", reason=f"target update {self.current_target}")
-        self.get_logger().info(f"[TARGET UPDATE] {self.current_target}")
+        self.get_logger().info(f"[TARGET] selected={self.current_target} -> restarting from folding")
 
     def _on_control_state(self, msg: String):
         new_state = (msg.data or "").strip() or "ready"
@@ -576,21 +643,21 @@ class PointJoint1Node(Node):
             return
         self.control_state = new_state
         if self.control_state in {"paused", "aborted"}:
-            self.get_logger().info(f"[CONTROL STATE] {self.control_state}")
+            self.get_logger().info(f"[GATE] control_state={self.control_state} -> cancel in-flight motion")
             self._bump_sequence_generation(f"control_state={self.control_state}")
             self._request_stop(f"control_state={self.control_state}")
             return
         if self.control_state == "ready":
-            self.get_logger().info(f"[CONTROL STATE] ready (resume phase={self.phase})")
+            self.get_logger().info(f"[GATE] control_state=ready (resume phase={self.phase})")
             return
-        self.get_logger().info(f"[CONTROL STATE] {self.control_state}")
+        self.get_logger().info(f"[GATE] control_state={self.control_state}")
 
     def _on_arm_armed(self, msg: Bool):
         new_armed = bool(msg.data)
         if new_armed == self.arm_armed:
             return
         self.arm_armed = new_armed
-        self.get_logger().info(f"[ARM ARMED] {self.arm_armed}")
+        self.get_logger().info(f"[GATE] arm_armed={self.arm_armed}")
         if not self.arm_armed:
             self._bump_sequence_generation("arm disarmed")
             self._request_stop("arm disarmed")
@@ -604,8 +671,63 @@ class PointJoint1Node(Node):
     def carriage_pos_cb(self, msg: Float64):
         if not self.has_carriage_feedback:
             self.has_carriage_feedback = True
-            self.get_logger().info("Received carriage feedback; using live carriage position for pointing")
+            self.get_logger().info("[INIT] received carriage feedback; using live carriage position for pointing")
         self.current_rail_pos = msg.data
+
+    def _topic_has_publishers(self, subscription) -> bool:
+        try:
+            return subscription.get_publisher_count() > 0
+        except Exception:
+            return True
+
+    def _demo_override_active(self, *, topic: str, enabled: bool, subscription, now: float) -> bool:
+        if not enabled:
+            return False
+        if self._topic_has_publishers(subscription):
+            return False
+        if now - self._started_at_s < self.demo_override_grace_s:
+            return False
+        key = f"{topic}"
+        if key not in self._demo_override_logged:
+            self._demo_override_logged.add(key)
+            self.get_logger().warn(
+                f"[GATE] demo override enabled for {topic}: no publishers after "
+                f"{self.demo_override_grace_s:.1f}s grace, treating gate as satisfied"
+            )
+        return True
+
+    def _effective_ready(self, now: float):
+        if self.control_state == "ready":
+            return True, "control_state=ready"
+        if self._demo_override_active(
+            topic="/robot_control_state",
+            enabled=self.demo_auto_ready,
+            subscription=self._control_state_sub,
+            now=now,
+        ):
+            return True, "demo_auto_ready"
+        return False, f"control_state={self.control_state}"
+
+    def _effective_armed(self, now: float):
+        if self.arm_armed:
+            return True, "arm_armed=true"
+        if self._demo_override_active(
+            topic="/arm_armed",
+            enabled=self.demo_auto_armed,
+            subscription=self._arm_armed_sub,
+            now=now,
+        ):
+            return True, "demo_auto_armed"
+        return False, "arm_armed=false"
+
+    def _log_blocked(self, now: float, reason: str) -> None:
+        if reason == self._last_blocked_reason and (
+            now - self._last_blocked_log_s
+        ) < self._blocked_log_repeat_s:
+            return
+        self._last_blocked_reason = reason
+        self._last_blocked_log_s = now
+        self.get_logger().info(f"[GATE] blocked: {reason}")
 
     def _consume_backend_outcome(self, now: float) -> None:
         outcome = self.arm_backend.consume_outcome()
@@ -628,18 +750,19 @@ class PointJoint1Node(Node):
                 self._set_phase("stretching", reason="turn move complete")
             elif outcome.phase == "stretching":
                 self._set_phase("idle", reason="stretch move complete")
-                self.get_logger().info("[SEQUENCE] pointing sequence complete")
+                self._trigger_post_stretch_gesture("stretch move complete")
+                self.get_logger().info("[RESULT] pointing sequence complete")
             self._cooldown_until = max(self._cooldown_until, now + 0.05)
             return
 
         if outcome.status == "canceled":
             self.get_logger().info(
-                f"[MOVEIT] phase={outcome.phase} canceled (request_id={outcome.request_id})"
+                f"[RESULT] canceled phase={outcome.phase} request_id={outcome.request_id}"
             )
         else:
             self.get_logger().warn(
-                f"[MOVEIT] phase={outcome.phase} failed; will retry after cooldown "
-                f"(error={outcome.error_name})"
+                f"[RESULT] failed phase={outcome.phase} request_id={outcome.request_id}; "
+                f"will retry after cooldown (error={outcome.error_name}, code={outcome.error_code})"
             )
 
         self._cooldown_until = max(self._cooldown_until, now + self.replan_cooldown_s)
@@ -660,6 +783,11 @@ class PointJoint1Node(Node):
             return desired
         return None
 
+    def _turning_yaw_tolerance_rad(self) -> float:
+        if self.joint1_deadband_rad > 0.0:
+            return max(1e-4, min(self.yaw_deadband_rad, self.joint1_deadband_rad))
+        return max(1e-4, self.yaw_deadband_rad)
+
     def _phase_is_already_satisfied(self, phase: str, current_positions, yaw_cmd: float) -> bool:
         if phase == "folding":
             fold_err = max(
@@ -670,7 +798,10 @@ class PointJoint1Node(Node):
 
         if phase == "turning":
             fold_ok = self._phase_is_already_satisfied("folding", current_positions, yaw_cmd)
-            yaw_ok = abs(shortest_angle_diff(yaw_cmd, current_positions[0])) < self.yaw_deadband_rad
+            yaw_ok = (
+                abs(shortest_angle_diff(yaw_cmd, current_positions[0]))
+                < self._turning_yaw_tolerance_rad()
+            )
             return fold_ok and yaw_ok
 
         if phase == "stretching":
@@ -693,10 +824,17 @@ class PointJoint1Node(Node):
                 self._set_phase("turning", reason="already folded")
                 progressed = True
             elif self.phase == "turning":
+                yaw_err = abs(shortest_angle_diff(yaw_cmd, current_positions[0]))
+                self.get_logger().info(
+                    f"[TURN] already at yaw: err={yaw_err:.4f} rad "
+                    f"(tol={self._turning_yaw_tolerance_rad():.4f}) "
+                    f"current_joint1={float(current_positions[0]):.4f} target_joint1={float(yaw_cmd):.4f}"
+                )
                 self._set_phase("stretching", reason="already at yaw with folded arm")
                 progressed = True
             elif self.phase == "stretching":
                 self._set_phase("idle", reason="already stretched and aligned")
+                self._trigger_post_stretch_gesture("already stretched and aligned")
                 self.get_logger().info("[SEQUENCE] pointing sequence complete (no-op)")
                 progressed = False
 
@@ -707,19 +845,34 @@ class PointJoint1Node(Node):
         now = self.get_clock().now().nanoseconds * 1e-9
         self._consume_backend_outcome(now)
 
-        if self.control_state != "ready":
+        ready_ok, ready_reason = self._effective_ready(now)
+        if not ready_ok:
+            if not self._topic_has_publishers(self._control_state_sub):
+                self._log_blocked(now, f"{ready_reason}; waiting for /robot_control_state publisher")
+            else:
+                self._log_blocked(now, ready_reason)
             return
 
-        if not self.arm_armed:
+        armed_ok, armed_reason = self._effective_armed(now)
+        if not armed_ok:
+            if not self._topic_has_publishers(self._arm_armed_sub):
+                self._log_blocked(now, f"{armed_reason}; waiting for /arm_armed publisher")
+            else:
+                self._log_blocked(now, armed_reason)
             return
 
         if self.arm_backend.is_busy():
             return
 
         if self.current_joint_state is None:
+            self._log_blocked(now, "waiting for /joint_states")
             return
 
         if self.current_target is None:
+            if not self._topic_has_publishers(self._target_sub):
+                self._log_blocked(now, "waiting for /selected_target publisher")
+            else:
+                self._log_blocked(now, "waiting for /selected_target command")
             return  # wait until we have a target
 
         if self.current_target not in TARGET_POSITIONS:
@@ -732,7 +885,7 @@ class PointJoint1Node(Node):
 
         target_pos = TARGET_POSITIONS[self.current_target]
         yaw_angle = self.rail.calculate_yaw_to_target(
-            current_pos_raw=self.current_rail_pos - 8.0,
+            current_pos_raw=self.current_rail_pos,
             target_pos_raw=target_pos,
         )
 
@@ -761,6 +914,15 @@ class PointJoint1Node(Node):
         if desired is None:
             return
 
+        if self.phase == "turning":
+            yaw_delta = shortest_angle_diff(yaw_cmd, current_joint1)
+            target_str = ", ".join(f"{float(v):.4f}" for v in desired)
+            self.get_logger().info(
+                f"[TURN] dispatch prep: current_joint1={current_joint1:.4f} target_joint1={yaw_cmd:.4f} "
+                f"delta={yaw_delta:.4f} rad (tol={self._turning_yaw_tolerance_rad():.4f}, "
+                f"yaw_deadband={self.yaw_deadband_rad:.4f}) targets=[{target_str}]"
+            )
+
         stretch_constraint = None
         if self.phase == "stretching" and self.constrain_joint1_during_stretching:
             stretch_constraint = (
@@ -779,6 +941,7 @@ class PointJoint1Node(Node):
         if sent:
             self._last_sent_yaw = yaw_cmd
             self._cooldown_until = now + self.replan_cooldown_s
+            self._last_blocked_reason = None
         else:
             self._cooldown_until = now + self.replan_cooldown_s
 
