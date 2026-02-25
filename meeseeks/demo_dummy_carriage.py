@@ -11,7 +11,8 @@ class DummyCarriage(Node):
         state_qos = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            # /robot_control_state is a command/gating topic; VOLATILE avoids CLI QoS mismatch.
+            durability=DurabilityPolicy.VOLATILE,
         )
         self.pub = self.create_publisher(Float64, "/elmo/id1/carriage/position/get", 10)
         self.create_subscription(String, "/robot_control_state", self._on_control_state, state_qos)

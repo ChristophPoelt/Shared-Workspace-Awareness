@@ -78,13 +78,15 @@ class MainLogic(Node):
         state_qos = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            # Command topics are operator-driven and should not require latched/transient QoS.
+            durability=DurabilityPolicy.VOLATILE,
         )
         target_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            # /selected_target is also a command-style topic; prefer CLI-friendly VOLATILE QoS.
+            durability=DurabilityPolicy.VOLATILE,
         )
         self.target_pub = self.create_publisher(String, "/selected_target", target_qos)
         self.control_state_pub = self.create_publisher(String, "/robot_control_state", state_qos)

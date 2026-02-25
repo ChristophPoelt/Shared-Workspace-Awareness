@@ -45,13 +45,13 @@ ros2 launch meeseeks bringup.launch.py demo:=true spawn_gripper_controller:=fals
 ros2 launch meeseeks bringup.launch.py demo:=true controller_manager:=/my_ns/controller_manager
 
 ## Run transcriber or voice_cli_publisher in separate Terminal
-colcon build --packages-select meeseeks [--symlink-install]
+colcon build --packages-select meeseeks --symlink-install
 source install/setup.bash
+
+source /opt/ros/jazzy/setup.bash
 
 ros2 run meeseeks transcriber
 ros2 run meeseeks voice_cli_publisher
-
-
 
 ## Set spawner works manually
 ros2 run controller_manager spawner gripper_controller --controller-manager /controller_manager --activate
