@@ -9,6 +9,7 @@ VOICE_COMMAND_TOPIC_DEFAULT = "/voice_commands"
 
 HELP = """\
 Type a command and press Enter, e.g.:
+  select
   target
   pause
   continue

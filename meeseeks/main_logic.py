@@ -6,9 +6,10 @@ import rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
-from std_msgs.msg import String, Float64
+from sensor_msgs.msg import JointState
+from std_msgs.msg import Bool, String, Float64
 from std_srvs.srv import Trigger
 
 from meeseeks.targetSelection import selectNewTarget
@@ -79,8 +80,15 @@ class MainLogic(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
-        self.target_pub = self.create_publisher(String, "/selected_target", 10)
+        target_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.target_pub = self.create_publisher(String, "/selected_target", target_qos)
         self.control_state_pub = self.create_publisher(String, "/robot_control_state", state_qos)
+        self.arm_armed_pub = self.create_publisher(Bool, "/arm_armed", state_qos)
         self.declare_parameter("voice_command_topic", VOICE_COMMAND_TOPIC_DEFAULT)
         self.voice_command_topic = str(
             self.get_parameter("voice_command_topic").value or VOICE_COMMAND_TOPIC_DEFAULT
@@ -90,19 +98,21 @@ class MainLogic(Node):
 
         # ─── State tracking ────────────────────────────────────────────────
         self.current_carriage_pos = None
-        self._no_carriage_feedback_logged = False
-        self._pointing_only_reach_logged = False
-        self.target_position_threshold = 0.15  # meters
-        self.state = "initializing"  # initializing, waiting_*, ready(moving), paused, aborted
+        self.state = "initializing"  # initializing, ready, paused, aborted
         self._state_lock = threading.RLock()
-        self.pre_move_wait_s = 15.0
-        self.post_reach_wait_s = 15.0
         self.pause_wait_s = 30.0
         self._state_deadline = None
         self._resume_state_after_pause = None
         self._resume_state_after_abort = None
         self._suspended_deadline_remaining = None
+        self._arm_armed = False
+        self._joint_states_seen = 0
+        self._joint_states_required_for_arming = 2
+        self._robot_init_done = False
+        self._last_select_time = 0.0
+        self._select_cooldown_s = 1.0
         self._publish_control_state()
+        self._publish_arm_armed()
 
         # Service client for robot initialization (Franzi)
         self.robot_init_client = self.create_client(
@@ -116,6 +126,15 @@ class MainLogic(Node):
             Float64,
             "/elmo/id1/carriage/position/get",
             self._on_carriage_position,
+            10,
+            callback_group=self.cb_group,
+        )
+
+        # Subscribe to joint states for startup arming (prevent arm motion until feedback is alive).
+        self.create_subscription(
+            JointState,
+            "/joint_states",
+            self._on_joint_states_for_arming,
             10,
             callback_group=self.cb_group,
         )
@@ -147,10 +166,9 @@ class MainLogic(Node):
 
         # ----- Init sequence -----
         self._initial_pose()
-
-        # Select initial target and start the pre-movement waiting phase.
-        self._start_target_cycle(initial=True)
-        self.get_logger().info("Initialization complete. Workflow started.")
+        self.get_logger().info(
+            "Initialization requested. Waiting for arm arming and a 'select' voice command."
+        )
 
         # Main loop timer
         self.control_timer = self.create_timer(
@@ -172,12 +190,43 @@ class MainLogic(Node):
             self.abort_command_logic()
         elif "pause" in cmd:
             self.pause_command_logic()
+        elif cmd in ("select", "target") or cmd.startswith("select "):
+            now = time.monotonic()
+            if now - self._last_select_time < self._select_cooldown_s:
+                self.get_logger().info(
+                    f"Ignoring duplicate select command within {self._select_cooldown_s:.1f}s cooldown"
+                )
+                return
+            self._last_select_time = now
+            self.select_target_command_logic()
         elif "where" in cmd and "going" in cmd:
             self.where_are_you_going_logic()
         elif "continue" in cmd:
             self.continue_logic()
         else:
             self.get_logger().warn(f"Unknown voice command: '{raw}'")
+
+    def select_target_command_logic(self) -> None:
+        with self._state_lock:
+            initial = gv.currentTargetGlobal is None
+            self._select_new_target_safe(initial=initial)
+
+            self._target_indication()
+
+            if self.state == "initializing":
+                self.get_logger().info(
+                    "Target selected while system is not armed yet. "
+                    "Pointing will start after /arm_armed becomes True. "
+                    "Skipping target-selected gesture until ready."
+                )
+            elif self.state in ("paused", "aborted"):
+                self.get_logger().info(
+                    f"Target selected while state={self.state}; motion remains blocked until resume/continue. "
+                    "Skipping target-selected gesture while blocked."
+                )
+            else:
+                self.gesture.target_selected()
+                self.get_logger().info(f"Target selection command handled: {gv.currentTargetGlobal}")
 
     def abort_command_logic(self) -> None:
         with self._state_lock:
@@ -196,9 +245,9 @@ class MainLogic(Node):
     def pause_command_logic(self) -> None:
         with self._state_lock:
             self.get_logger().info("PAUSE: Pausing robot movement")
-            if self.state in ("waiting_before_move", "ready", "waiting_after_reach"):
+            if self.state in ("initializing", "ready"):
                 self._resume_state_after_pause = self.state
-                # Pause freezes the workflow timer; resume behavior is handled in main loop.
+                # Pause freezes any workflow deadline (currently used for pause timeout only).
                 self._suspended_deadline_remaining = self._remaining_deadline_seconds()
                 self._state_deadline = time.monotonic() + self.pause_wait_s
                 self._set_state("paused")
@@ -219,13 +268,6 @@ class MainLogic(Node):
             else:
                 self.get_logger().info("  Current position: unknown (no data yet)")
 
-            # User workflow: asking this during the pre-move wait starts movement immediately.
-            if self.state == "waiting_before_move":
-                self.get_logger().info(
-                    "WHERE-ARE-YOU-GOING command received during waiting period -> starting movement now"
-                )
-                self._begin_movement_to_current_target()
-
     def continue_logic(self) -> None:
         with self._state_lock:
             self.get_logger().info("CONTINUE: Resuming robot movement")
@@ -245,83 +287,38 @@ class MainLogic(Node):
     def _on_carriage_position(self, msg: Float64) -> None:
         self.current_carriage_pos = msg.data
 
+    def _on_joint_states_for_arming(self, _msg: JointState) -> None:
+        if self._arm_armed:
+            return
+
+        self._joint_states_seen += 1
+        if not self._robot_init_done:
+            return
+        if self._joint_states_seen < self._joint_states_required_for_arming:
+            return
+
+        self._arm_armed = True
+        self._publish_arm_armed()
+        self.get_logger().info(
+            f"Arm armed: received {self._joint_states_seen} /joint_states messages."
+        )
+        with self._state_lock:
+            if self.state == "initializing":
+                self._set_state("ready")
+
     def main_control_loop(self) -> None:
         with self._state_lock:
             if self.state == "paused":
                 if self._state_deadline is not None and time.monotonic() >= self._state_deadline:
                     self.get_logger().info("Pause timeout elapsed -> reinitiating workflow/movement")
                     self._resume_from_pause(auto=True)
-                    self.gesture.resume()
                 return
 
             if self.state == "aborted":
                 return
 
-            if self.state == "waiting_before_move":
-                if self._state_deadline is not None and time.monotonic() >= self._state_deadline:
-                    self.get_logger().info("Pre-movement waiting period finished -> starting movement")
-                    self._begin_movement_to_current_target()
-                return
-
-            if self.state == "waiting_after_reach":
-                if self._state_deadline is not None and time.monotonic() >= self._state_deadline:
-                    self.get_logger().info("Post-reach waiting period finished -> selecting new target")
-                    self._start_target_cycle(initial=False)
-                return
-
             if self.state != "ready":
                 return
-
-            if not self._is_target_reached():
-                return
-
-            self.get_logger().warn("=" * 60)
-            self.get_logger().warn("TARGET REACHED!")
-            self.get_logger().warn("=" * 60)
-
-            self._enter_post_reach_wait()
-
-    # ─── Target Reach Detection ────────────────────────────────────────────
-    def _is_target_reached(self) -> bool:
-        if self.pointing_only_mode:
-            if not self._pointing_only_reach_logged:
-                self.get_logger().info(
-                    "Pointing-only mode: treating targets as reached without carriage movement."
-                )
-                self._pointing_only_reach_logged = True
-            return True
-
-        if self.current_carriage_pos is None:
-            if not self._no_carriage_feedback_logged:
-                self.get_logger().warn(
-                    "No carriage feedback available; running in pointing-only mode "
-                    "(treating targets as immediately reached)"
-                )
-                self._no_carriage_feedback_logged = True
-            return True
-
-        TARGET_POSITIONS = {
-            "position0": 2.7,
-            "position1": -2.5,
-            "position2": -1.0,
-        }
-
-        if gv.currentTargetGlobal not in TARGET_POSITIONS:
-            self.get_logger().warn(f"Unknown target: {gv.currentTargetGlobal}")
-            return False
-
-        target_pos = TARGET_POSITIONS[gv.currentTargetGlobal]
-        distance = abs(self.current_carriage_pos - target_pos)
-        reached = distance < self.target_position_threshold
-
-        if distance < 0.3:
-            self.get_logger().info(
-                f"Target: {gv.currentTargetGlobal} ({target_pos:.3f}), "
-                f"Current: {self.current_carriage_pos:.3f}, "
-                f"Distance: {distance:.3f}m {'✓ REACHED' if reached else ''}"
-            )
-
-        return reached
 
     # -------------------------
     # Helpers
@@ -345,6 +342,9 @@ class MainLogic(Node):
             self.get_logger().error(f"selectNewTarget failed: {e}")
             self.get_logger().warn("Falling back to position0")
             gv.currentTargetGlobal = "position0"
+            msg = String()
+            msg.data = gv.currentTargetGlobal
+            self.target_pub.publish(msg)
 
     # -------------------------
     # Robot init (Franzi)
@@ -369,6 +369,8 @@ class MainLogic(Node):
                     self.get_logger().warn("Robot initialization: no response")
             except Exception as e:
                 self.get_logger().error(f"Initialization service error: {e}")
+            finally:
+                self._robot_init_done = True
 
         future.add_done_callback(_done_cb)
 
@@ -383,6 +385,11 @@ class MainLogic(Node):
         msg.data = self.state
         self.control_state_pub.publish(msg)
 
+    def _publish_arm_armed(self) -> None:
+        msg = Bool()
+        msg.data = self._arm_armed
+        self.arm_armed_pub.publish(msg)
+
     def _set_state(self, new_state: str) -> None:
         if self.state == new_state:
             return
@@ -394,35 +401,6 @@ class MainLogic(Node):
             return None
         return max(0.0, self._state_deadline - time.monotonic())
 
-    def _start_target_cycle(self, initial: bool) -> None:
-        self._select_new_target_safe(initial=initial)
-        if initial:
-            self.get_logger().info(f"Initial target selected: {gv.currentTargetGlobal}")
-        else:
-            self.get_logger().info(f"New target selected: {gv.currentTargetGlobal}")
-
-        # Target selected gesture, then target indication (pointing node reacts to the target topic).
-        self.gesture.target_selected()
-        self._target_indication()
-
-        self._state_deadline = time.monotonic() + self.pre_move_wait_s
-        self._set_state("waiting_before_move")
-        self.get_logger().info(
-            f"Waiting {self.pre_move_wait_s:.0f}s before moving to {gv.currentTargetGlobal}"
-        )
-
-    def _begin_movement_to_current_target(self) -> None:
-        self._state_deadline = None
-        self._set_state("ready")
-        self.get_logger().info(f"Pointing toward target (no carriage move): {gv.currentTargetGlobal}")
-
-    def _enter_post_reach_wait(self) -> None:
-        self._state_deadline = time.monotonic() + self.post_reach_wait_s
-        self._set_state("waiting_after_reach")
-        self.get_logger().info(
-            f"Waiting {self.post_reach_wait_s:.0f}s before selecting the next target"
-        )
-
     def _resume_from_pause(self, auto: bool) -> None:
         prev_state = self._resume_state_after_pause or "ready"
         remaining = self._suspended_deadline_remaining
@@ -430,22 +408,18 @@ class MainLogic(Node):
         self._suspended_deadline_remaining = None
         self._state_deadline = None
 
-        # Workflow requirement: after pause, reinitiate movement after 30s.
-        if prev_state in ("waiting_before_move", "ready"):
-            self._begin_movement_to_current_target()
-            if auto:
-                self.get_logger().info("Pause timeout complete -> movement reinitiated")
-            return
-
-        if prev_state == "waiting_after_reach":
-            self._set_state("waiting_after_reach")
-            if remaining is not None:
-                self._state_deadline = time.monotonic() + remaining
+        if prev_state in ("initializing", "ready"):
+            if self._arm_armed:
+                self._set_state("ready")
             else:
-                self._state_deadline = time.monotonic() + self.post_reach_wait_s
+                self._set_state("initializing")
+            if auto:
+                self.get_logger().info("Pause timeout complete -> motion unblocked")
             return
 
-        self._set_state("ready")
+        if remaining is not None:
+            self._state_deadline = time.monotonic() + remaining
+        self._set_state("ready" if self._arm_armed else "initializing")
 
     def _resume_from_abort(self) -> None:
         prev_state = self._resume_state_after_abort or "ready"
@@ -453,23 +427,16 @@ class MainLogic(Node):
         self._resume_state_after_abort = None
         self._suspended_deadline_remaining = None
 
-        if prev_state == "paused":
-            # Continue from an aborted-pause scenario as active movement.
-            self._state_deadline = None
-            self._begin_movement_to_current_target()
-            return
-
-        if prev_state in ("waiting_before_move", "waiting_after_reach"):
-            self._set_state(prev_state)
-            if remaining is not None:
-                self._state_deadline = time.monotonic() + remaining
-            else:
-                wait_s = self.pre_move_wait_s if prev_state == "waiting_before_move" else self.post_reach_wait_s
-                self._state_deadline = time.monotonic() + wait_s
-            return
-
         self._state_deadline = None
-        self._set_state("ready")
+        if remaining is not None:
+            self._state_deadline = time.monotonic() + remaining
+
+        if prev_state == "paused":
+            prev_state = "ready"
+        if prev_state == "initializing" and not self._arm_armed:
+            self._set_state("initializing")
+        else:
+            self._set_state("ready" if self._arm_armed else "initializing")
 
 
 def main(args=None):
