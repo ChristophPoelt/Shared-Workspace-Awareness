@@ -3,7 +3,7 @@ import numpy as np
 
 
 class ClockwiseRail:
-    def __init__(self, length_long=3.43, length_short=0.992, radius=0.279, zero_offset=-7.2):
+    def __init__(self, length_long=3.43, length_short=0.992, radius=0.279, zero_offset=-8.8):
         """
         Rail-Modell (Rechteck mit runden Ecken), im Uhrzeigersinn (CW).
 
@@ -135,7 +135,7 @@ class ClockwiseRail:
         return angle_diff
 
 
-rail = ClockwiseRail(length_long=3.43, length_short=0.992, radius=0.279, zero_offset=0.8)
+rail = ClockwiseRail(length_long=3.43, length_short=0.992, radius=0.279, zero_offset=-8.8)
 
 current_pos = 4.28
 target_pos = 4.50
