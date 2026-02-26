@@ -39,6 +39,7 @@ setup(
             'voice_cli_publisher = meeseeks.voice_cli_pub:main',
             'transcriber = meeseeks.transcriber:main',
             "gripper_action_adapter = meeseeks.gripper_action_adapter:main",
+            "emergency_stop = meeseeks.emergency_stop:main",
         ],
     },
 )

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import threading
 import time
 
@@ -25,6 +26,21 @@ class GestureController:
         self._cli_target_selected = node.create_client(
             Trigger, "/gesture/target_selected", callback_group=cb_group
         )
+        self._cli_target_selected_blocking = node.create_client(
+            Trigger, "/gesture/target_selected_blocking", callback_group=cb_group
+        )
+        self._cli_wipe = node.create_client(
+            Trigger, "/gesture/wipe", callback_group=cb_group
+        )
+        self._cli_wipe_blocking = node.create_client(
+            Trigger, "/gesture/wipe_blocking", callback_group=cb_group
+        )
+        self._cli_grab = node.create_client(
+            Trigger, "/gesture/grab", callback_group=cb_group
+        )
+        self._cli_grab_blocking = node.create_client(
+            Trigger, "/gesture/grab_blocking", callback_group=cb_group
+        )
         self._cli_pause = node.create_client(
             Trigger, "/gesture/pause", callback_group=cb_group
         )
@@ -38,7 +54,7 @@ class GestureController:
     def _call_async(self, client, label: str) -> None:
         if not client.service_is_ready():
             if not client.wait_for_service(timeout_sec=1.0):
-                self._node.get_logger().warn(f"Service not available: {label}")
+                self._node.get_logger().warn(f"[GESTURE] service not available: {label}")
                 return
 
         fut = client.call_async(Trigger.Request())
@@ -47,18 +63,73 @@ class GestureController:
             try:
                 resp = f.result()
                 if resp and resp.success:
-                    self._node.get_logger().info(f"{label}: OK ({resp.message})")
+                    self._node.get_logger().info(f"[GESTURE] {label}: OK ({resp.message})")
                 elif resp:
-                    self._node.get_logger().warn(f"{label}: FAIL ({resp.message})")
+                    self._node.get_logger().warn(f"[GESTURE] {label}: FAIL ({resp.message})")
                 else:
-                    self._node.get_logger().warn(f"{label}: no response")
+                    self._node.get_logger().warn(f"[GESTURE] {label}: no response")
             except Exception as e:
-                self._node.get_logger().error(f"{label}: exception: {e}")
+                self._node.get_logger().error(f"[GESTURE] {label}: exception: {e}")
 
         fut.add_done_callback(_done_cb)
 
     def target_selected(self) -> None:
         self._call_async(self._cli_target_selected, "/gesture/target_selected")
+
+    def target_selected_blocking(self) -> bool:
+        return self._call_blocking(self._cli_target_selected_blocking, "/gesture/target_selected_blocking")
+
+    def _call_blocking(self, client, label: str, timeout_s: float = 30.0) -> bool:
+        if not client.service_is_ready():
+            if not client.wait_for_service(timeout_sec=1.0):
+                self._node.get_logger().warn(f"[GESTURE] service not available: {label}")
+                return False
+        future = client.call_async(Trigger.Request())
+        deadline = time.monotonic() + max(0.5, float(timeout_s))
+        while not future.done():
+            if time.monotonic() >= deadline:
+                self._node.get_logger().warn(f"[GESTURE] {label}: timeout waiting for response")
+                return False
+            time.sleep(0.05)
+        try:
+            resp = future.result()
+        except Exception as e:
+            self._node.get_logger().error(f"[GESTURE] {label}: exception: {e}")
+            return False
+        if resp and resp.success:
+            self._node.get_logger().info(f"[GESTURE] {label}: OK ({resp.message})")
+            return True
+        msg = resp.message if resp else "no response"
+        self._node.get_logger().warn(f"[GESTURE] {label}: FAIL ({msg})")
+        return False
+
+    def _call_prefer_blocking(self, blocking_client, blocking_label: str, async_client, async_label: str) -> bool:
+        if blocking_client.service_is_ready():
+            return self._call_blocking(blocking_client, blocking_label)
+        if blocking_client.wait_for_service(timeout_sec=0.3):
+            return self._call_blocking(blocking_client, blocking_label)
+        self._node.get_logger().warn(
+            f"[GESTURE] {blocking_label} unavailable; falling back to {async_label} + fixed wait"
+        )
+        self._call_async(async_client, async_label)
+        time.sleep(1.5)
+        return True
+
+    def wipe_blocking_prefer(self) -> bool:
+        return self._call_prefer_blocking(
+            self._cli_wipe_blocking,
+            "/gesture/wipe_blocking",
+            self._cli_wipe,
+            "/gesture/wipe",
+        )
+
+    def grab_blocking_prefer(self) -> bool:
+        return self._call_prefer_blocking(
+            self._cli_grab_blocking,
+            "/gesture/grab_blocking",
+            self._cli_grab,
+            "/gesture/grab",
+        )
 
     def pause(self) -> None:
         self._call_async(self._cli_pause, "/gesture/pause")
@@ -78,21 +149,25 @@ class MainLogic(Node):
         state_qos = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            # Command topics are operator-driven and should not require latched/transient QoS.
+            durability=DurabilityPolicy.VOLATILE,
         )
         target_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            # /selected_target is also a command-style topic; prefer CLI-friendly VOLATILE QoS.
+            durability=DurabilityPolicy.VOLATILE,
         )
         self.target_pub = self.create_publisher(String, "/selected_target", target_qos)
         self.control_state_pub = self.create_publisher(String, "/robot_control_state", state_qos)
         self.arm_armed_pub = self.create_publisher(Bool, "/arm_armed", state_qos)
         self.declare_parameter("voice_command_topic", VOICE_COMMAND_TOPIC_DEFAULT)
+        self.declare_parameter("demo_mode", False)
         self.voice_command_topic = str(
             self.get_parameter("voice_command_topic").value or VOICE_COMMAND_TOPIC_DEFAULT
         )
+        self.demo_mode = bool(self.get_parameter("demo_mode").value)
         self.declare_parameter("pointing_only_mode", True)
         self.pointing_only_mode = bool(self.get_parameter("pointing_only_mode").value)
 
@@ -111,6 +186,10 @@ class MainLogic(Node):
         self._robot_init_done = False
         self._last_select_time = 0.0
         self._select_cooldown_s = 1.0
+        self._pending_target = None
+        self._pending_target_confirmed = False
+        self._pre_move_gesture_running = False
+        self._next_what_gesture = "wipe"
         self._publish_control_state()
         self._publish_arm_armed()
 
@@ -153,7 +232,15 @@ class MainLogic(Node):
 
         self.get_logger().info("=" * 60)
         self.get_logger().info(
-            f"MainLogic Node Starting (subscribing for voice commands on {self.voice_command_topic})"
+            f"[INIT] node={self.get_name()} pid={os.getpid()} "
+            f"MainLogic starting (voice topic={self.voice_command_topic}, demo_mode={self.demo_mode})"
+        )
+        self.get_logger().info(
+            "[INIT] main_logic is the canonical publisher for /robot_control_state and /arm_armed "
+            "(and publishes /selected_target selections)."
+        )
+        self.get_logger().info(
+            "[GATE] startup state=initializing arm_armed=False (strict by default until init + feedback complete)"
         )
         self.get_logger().info(
             "Voice input source is optional: run transcriber separately or use voice_cli_publisher manually."
@@ -163,6 +250,7 @@ class MainLogic(Node):
                 "Pointing-only mode enabled in main_logic: carriage reach detection is disabled."
             )
         self.get_logger().info("=" * 60)
+        self.create_timer(5.0, self._warn_on_duplicate_node_names, callback_group=self.cb_group)
 
         # ----- Init sequence -----
         self._initial_pose()
@@ -184,7 +272,7 @@ class MainLogic(Node):
         if not cmd:
             return
 
-        self.get_logger().info(f"Voice command received: '{raw}'")
+        self.get_logger().info(f"[INIT] voice command received: '{raw}'")
 
         if "abort" in cmd:
             self.abort_command_logic()
@@ -194,12 +282,14 @@ class MainLogic(Node):
             now = time.monotonic()
             if now - self._last_select_time < self._select_cooldown_s:
                 self.get_logger().info(
-                    f"Ignoring duplicate select command within {self._select_cooldown_s:.1f}s cooldown"
+                    f"[TARGET] ignoring duplicate select within {self._select_cooldown_s:.1f}s cooldown"
                 )
                 return
             self._last_select_time = now
             self.select_target_command_logic()
-        elif "where" in cmd and "going" in cmd:
+        elif cmd == "what" or cmd == "what are you doing" or ("what" in cmd and "doing" in cmd):
+            self.what_are_you_doing_logic()
+        elif cmd in ("where", "confirm") or ("where" in cmd and "going" in cmd):
             self.where_are_you_going_logic()
         elif "continue" in cmd:
             self.continue_logic()
@@ -209,30 +299,104 @@ class MainLogic(Node):
     def select_target_command_logic(self) -> None:
         with self._state_lock:
             initial = gv.currentTargetGlobal is None
-            self._select_new_target_safe(initial=initial)
+            target = self._select_new_target_safe(
+                initial=initial,
+                publish_selected_target=False,
+            )
+            if not target:
+                return
 
             self._target_indication()
-
-            if self.state == "initializing":
-                self.get_logger().info(
-                    "Target selected while system is not armed yet. "
-                    "Pointing will start after /arm_armed becomes True. "
-                    "Skipping target-selected gesture until ready."
-                )
-            elif self.state in ("paused", "aborted"):
+            self._pending_target = target
+            self._pending_target_confirmed = False
+            self._pre_move_gesture_running = True
+            state_at_select = self.state
+            if state_at_select == "paused":
+                self._pre_move_gesture_running = False
                 self.get_logger().info(
                     f"Target selected while state={self.state}; motion remains blocked until resume/continue. "
                     "Skipping target-selected gesture while blocked."
                 )
+                self.get_logger().info(
+                    f"[TARGET] waiting for 'where are you going' confirmation before publishing target: {target}"
+                )
+                return
+
+        gesture_ok = self.gesture.target_selected_blocking()
+        with self._state_lock:
+            self._pre_move_gesture_running = False
+            if self._pending_target != target:
+                self.get_logger().info(
+                    f"[TARGET] select result became stale while waiting for gesture (target={target})"
+                )
+                return
+            if not gesture_ok:
+                self.get_logger().warn(
+                    f"[TARGET] select gesture did not complete successfully; target remains pending: {target}"
+                )
+                return
+
+            if self.state == "initializing":
+                self.get_logger().info(
+                    "Target selected while system is not armed yet. "
+                    "Pointing will start after /arm_armed becomes True and confirmation. "
+                    "Waiting for 'where are you going'."
+                )
+            elif self.state == "aborted":
+                self.get_logger().info(
+                    f"[TARGET] stored pending target while aborted: {target} "
+                    "(motion will start after continue + confirmation)"
+                )
             else:
-                self.gesture.target_selected()
-                self.get_logger().info(f"Target selection command handled: {gv.currentTargetGlobal}")
+                self.get_logger().info(
+                    f"[TARGET] select gesture finished; waiting for 'where are you going' to start motion "
+                    f"(target={gv.currentTargetGlobal})"
+                )
+
+    def what_are_you_doing_logic(self) -> None:
+        with self._state_lock:
+            if self._pending_target is None or self._pending_target_confirmed:
+                self.get_logger().info(
+                    "[GESTURE] 'what' ignored: only allowed after select and before confirm/motion start"
+                )
+                return
+            if self._pre_move_gesture_running:
+                self.get_logger().info("[GESTURE] 'what' ignored: another pre-move gesture is still running")
+                return
+            gesture_name = self._next_what_gesture
+            self._pre_move_gesture_running = True
+
+        try:
+            if gesture_name == "wipe":
+                ok = self.gesture.wipe_blocking_prefer()
+            else:
+                ok = self.gesture.grab_blocking_prefer()
+        finally:
+            with self._state_lock:
+                self._pre_move_gesture_running = False
+
+        with self._state_lock:
+            if self._pending_target is None or self._pending_target_confirmed:
+                self.get_logger().info(
+                    f"[GESTURE] pre-move '{gesture_name}' completed but pre-move window already closed"
+                )
+                return
+            if ok:
+                self._next_what_gesture = "grab" if gesture_name == "wipe" else "wipe"
+                self.get_logger().info(
+                    f"[GESTURE] pre-move 'what' gesture executed: {gesture_name} "
+                    f"(next={self._next_what_gesture})"
+                )
+            else:
+                self.get_logger().warn(
+                    f"[GESTURE] pre-move 'what' gesture failed: {gesture_name} (will retry same next time)"
+                )
 
     def abort_command_logic(self) -> None:
         with self._state_lock:
-            self.get_logger().info("ABORT: Stopping all operations")
+            self.get_logger().info("[GATE] ABORT requested: stopping all operations")
             if self.state == "aborted":
-                self.get_logger().warn("Robot is already aborted; waiting for continue")
+                self.get_logger().warn("[GATE] robot is already aborted; waiting for continue")
                 return
 
             self._resume_state_after_abort = self.state
@@ -240,11 +404,11 @@ class MainLogic(Node):
             self._state_deadline = None
             self._set_state("aborted")
             self.gesture.abort()
-            self.get_logger().info("Robot aborted and frozen (waiting for continue command)")
+            self.get_logger().info("[GATE] robot aborted and frozen (waiting for continue command)")
 
     def pause_command_logic(self) -> None:
         with self._state_lock:
-            self.get_logger().info("PAUSE: Pausing robot movement")
+            self.get_logger().info("[GATE] PAUSE requested: pausing robot movement")
             if self.state in ("initializing", "ready"):
                 self._resume_state_after_pause = self.state
                 # Pause freezes any workflow deadline (currently used for pause timeout only).
@@ -253,33 +417,47 @@ class MainLogic(Node):
                 self._set_state("paused")
                 self.gesture.pause()
                 self.get_logger().info(
-                    f"Robot paused for up to {self.pause_wait_s:.0f}s "
+                    f"[GATE] robot paused for up to {self.pause_wait_s:.0f}s "
                     "(movement will reinitiate automatically)"
                 )
             else:
-                self.get_logger().warn(f"Cannot pause in state: {self.state}")
+                self.get_logger().warn(f"[GATE] cannot pause in state={self.state}")
 
     def where_are_you_going_logic(self) -> None:
         with self._state_lock:
-            self.get_logger().info("WHERE ARE YOU GOING?")
-            self.get_logger().info(f"  Current target: {gv.currentTargetGlobal}")
+            self.get_logger().info("[TARGET] WHERE ARE YOU GOING?")
+            self.get_logger().info(f"[TARGET] current target: {gv.currentTargetGlobal}")
             if self.current_carriage_pos is not None:
-                self.get_logger().info(f"  Current position: {self.current_carriage_pos:.3f}")
+                self.get_logger().info(f"[TARGET] current position: {self.current_carriage_pos:.3f}")
             else:
-                self.get_logger().info("  Current position: unknown (no data yet)")
+                self.get_logger().info("[TARGET] current position: unknown (no data yet)")
+            if self._pre_move_gesture_running:
+                self.get_logger().info(
+                    "[TARGET] confirmation deferred: pre-move gesture still running"
+                )
+                return
+            if self._pending_target is None:
+                self.get_logger().warn("[TARGET] no pending target to confirm (say 'select' first)")
+                return
+            self._pending_target_confirmed = True
+            self.get_logger().info(
+                f"[TARGET] confirmation received for pending target: {self._pending_target}"
+            )
+            self._publish_pending_target_if_ready()
 
     def continue_logic(self) -> None:
         with self._state_lock:
-            self.get_logger().info("CONTINUE: Resuming robot movement")
+            self.get_logger().info("[GATE] CONTINUE requested: resuming robot movement")
             if self.state == "paused":
                 self._resume_from_pause(auto=False)
                 self.gesture.resume()
-                self.get_logger().info("Robot resumed")
+                self.get_logger().info("[GATE] robot resumed")
             elif self.state == "aborted":
                 self._resume_from_abort()
-                self.get_logger().info("Robot continued after abort")
+                self._publish_pending_target_if_ready()
+                self.get_logger().info("[GATE] robot continued after abort")
             else:
-                self.get_logger().warn(f"Nothing to resume (state: {self.state})")
+                self.get_logger().warn(f"[GATE] nothing to resume (state={self.state})")
 
     # -------------------------
     # Main control loop
@@ -300,17 +478,18 @@ class MainLogic(Node):
         self._arm_armed = True
         self._publish_arm_armed()
         self.get_logger().info(
-            f"Arm armed: received {self._joint_states_seen} /joint_states messages."
+            f"[INIT] arm armed after {self._joint_states_seen} /joint_states messages."
         )
         with self._state_lock:
             if self.state == "initializing":
                 self._set_state("ready")
+                self._publish_pending_target_if_ready()
 
     def main_control_loop(self) -> None:
         with self._state_lock:
             if self.state == "paused":
                 if self._state_deadline is not None and time.monotonic() >= self._state_deadline:
-                    self.get_logger().info("Pause timeout elapsed -> reinitiating workflow/movement")
+                    self.get_logger().info("[GATE] pause timeout elapsed -> reinitiating workflow/movement")
                     self._resume_from_pause(auto=True)
                 return
 
@@ -323,8 +502,8 @@ class MainLogic(Node):
     # -------------------------
     # Helpers
     # -------------------------
-    def _select_new_target_safe(self, initial: bool) -> None:
-        """Select a new target and FORCE update the global state."""
+    def _select_new_target_safe(self, initial: bool, publish_selected_target: bool = True):
+        """Select a new target and optionally publish /selected_target."""
         try:
             prev = gv.currentTargetGlobal
             target = selectNewTarget(None if initial else prev)
@@ -332,28 +511,35 @@ class MainLogic(Node):
             # Force-update global, even if selectNewTarget() only returns a value
             gv.currentTargetGlobal = target
             
-            msg = String()
-            msg.data = target
-            self.target_pub.publish(msg)
-            self.get_logger().info(f"Published /selected_target: {target}")
-            self.get_logger().info(f"Selected target: {target}")
+            self.get_logger().info(f"[TARGET] selected target: {target}")
+            if publish_selected_target:
+                self._publish_selected_target(target)
+            else:
+                self.get_logger().info(
+                    f"[TARGET] not publishing /selected_target while state={self.state}; stored only"
+                )
+            return target
 
         except Exception as e:
             self.get_logger().error(f"selectNewTarget failed: {e}")
-            self.get_logger().warn("Falling back to position0")
+            self.get_logger().warn("[TARGET] falling back to position0")
             gv.currentTargetGlobal = "position0"
-            msg = String()
-            msg.data = gv.currentTargetGlobal
-            self.target_pub.publish(msg)
+            if publish_selected_target:
+                self._publish_selected_target(gv.currentTargetGlobal)
+            else:
+                self.get_logger().info(
+                    f"[TARGET] not publishing /selected_target while state={self.state}; stored fallback only"
+                )
+            return gv.currentTargetGlobal
 
     # -------------------------
     # Robot init (Franzi)
     # -------------------------
     def _initial_pose(self) -> None:
-        self.get_logger().info("Requesting robot initialization...")
+        self.get_logger().info("[INIT] requesting /robot/initialize service...")
 
         if not self.robot_init_client.wait_for_service(timeout_sec=5.0):
-            self.get_logger().error("Robot initialization service not available")
+            self.get_logger().error("[INIT] /robot/initialize service not available")
             return
 
         future = self.robot_init_client.call_async(Trigger.Request())
@@ -362,13 +548,13 @@ class MainLogic(Node):
             try:
                 resp = f.result()
                 if resp and resp.success:
-                    self.get_logger().info("Robot initialized successfully")
+                    self.get_logger().info(f"[INIT] robot initialized successfully ({resp.message})")
                 elif resp:
-                    self.get_logger().warn(f"Robot initialization failed: {resp.message}")
+                    self.get_logger().warn(f"[INIT] robot initialization failed: {resp.message}")
                 else:
-                    self.get_logger().warn("Robot initialization: no response")
+                    self.get_logger().warn("[INIT] robot initialization: no response")
             except Exception as e:
-                self.get_logger().error(f"Initialization service error: {e}")
+                self.get_logger().error(f"[INIT] initialization service error: {e}")
             finally:
                 self._robot_init_done = True
 
@@ -377,24 +563,46 @@ class MainLogic(Node):
     # Pointing node handles moving joint_1 toward the current target
     def _target_indication(self) -> None:
         self.get_logger().info(
-            "Pointing gesture is handled by the separate pointing_to_target_logic node"
+            "[PHASE] pointing gesture is handled by the separate pointing_to_target_logic node"
         )
+
+    def _publish_selected_target(self, target: str) -> None:
+        msg = String()
+        msg.data = str(target)
+        self.target_pub.publish(msg)
+        self.get_logger().info(f"[TARGET] published /selected_target: {target}")
 
     def _publish_control_state(self) -> None:
         msg = String()
         msg.data = self.state
         self.control_state_pub.publish(msg)
+        self.get_logger().info(f"[GATE] publish /robot_control_state={self.state}")
 
     def _publish_arm_armed(self) -> None:
         msg = Bool()
         msg.data = self._arm_armed
         self.arm_armed_pub.publish(msg)
+        self.get_logger().info(f"[GATE] publish /arm_armed={self._arm_armed}")
 
     def _set_state(self, new_state: str) -> None:
         if self.state == new_state:
             return
+        old_state = self.state
         self.state = new_state
+        self.get_logger().info(f"[GATE] state transition {old_state} -> {new_state}")
         self._publish_control_state()
+
+    def _warn_on_duplicate_node_names(self) -> None:
+        try:
+            names = [name for name, _ns in self.get_node_names_and_namespaces()]
+        except Exception:
+            return
+        duplicates = sum(1 for name in names if name == self.get_name())
+        if duplicates > 1:
+            self.get_logger().warn(
+                f"[INIT] duplicate node name detected: {self.get_name()} count={duplicates}. "
+                "Avoid running multiple main_logic instances; this node is the canonical state publisher."
+            )
 
     def _remaining_deadline_seconds(self):
         if self._state_deadline is None:
@@ -414,7 +622,7 @@ class MainLogic(Node):
             else:
                 self._set_state("initializing")
             if auto:
-                self.get_logger().info("Pause timeout complete -> motion unblocked")
+                self.get_logger().info("[GATE] pause timeout complete -> motion unblocked")
             return
 
         if remaining is not None:
@@ -437,6 +645,25 @@ class MainLogic(Node):
             self._set_state("initializing")
         else:
             self._set_state("ready" if self._arm_armed else "initializing")
+
+    def _publish_pending_target_if_ready(self) -> None:
+        if self._pending_target is None:
+            return
+        if not self._pending_target_confirmed:
+            self.get_logger().info(
+                f"[TARGET] pending target retained ({self._pending_target}); waiting for 'where are you going'"
+            )
+            return
+        if self.state != "ready":
+            self.get_logger().info(
+                f"[TARGET] pending target retained ({self._pending_target}); state={self.state}"
+            )
+            return
+        target = self._pending_target
+        self._pending_target = None
+        self._pending_target_confirmed = False
+        self._publish_selected_target(target)
+        self.get_logger().info(f"[TARGET] dispatched pending target: {target}")
 
 
 def main(args=None):
