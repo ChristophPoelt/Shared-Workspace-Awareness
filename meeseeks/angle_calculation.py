@@ -3,7 +3,7 @@ import numpy as np
 
 
 class ClockwiseRail:
-    def __init__(self, length_long=3.43, length_short=0.992, radius=0.279, zero_offset=0.8):
+    def __init__(self, length_long=3.43, length_short=0.992, radius=0.279, zero_offset=-7.2):
         """
         Rail-Modell (Rechteck mit runden Ecken), im Uhrzeigersinn (CW).
 

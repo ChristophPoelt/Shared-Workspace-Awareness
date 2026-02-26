@@ -1,4 +1,12 @@
 # Shared-Workspace-Awareness
+export ROS_DOMAIN_ID=2
+echo $ROS_DOMAIN_ID
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+
+ros2 launch kortex_bringup gen3.launch.py robot_ip:=10.163.18.198 dof:=6 vision:=true gripper:=robotiq_2f_85 launch_rviz:=true
+ros2 launch kinova_gen3_6dof_robotiq_2f_85_moveit_config robot.launch.py robot_ip:=10.163.18.198 use_fake_hardware:=false
+
+
 
 ## Control pipeline (current architecture)
 - `main_logic` is the canonical publisher for:
@@ -24,6 +32,9 @@ ros2 run meeseeks pointing_to_target_logic --ros-args \
   -p moveit_group_name:=manipulator \
   -p moveit_action_name:=/move_action
 ```
+
+ros2 topic echo --once /robot_control_state
+ros2 topic echo --once /arm_armed
 
 Then publish a target (no QoS flags needed):
 
@@ -141,8 +152,10 @@ ros2 launch meeseeks bringup.launch.py demo:=true controller_manager:=/my_ns/con
 ## Run transcriber or voice_cli_publisher in separate Terminal
 colcon build --packages-select meeseeks --symlink-install
 source install/setup.bash
-
 source /opt/ros/jazzy/setup.bash
+
+ros2 topic pub /elmo/id2/carriage/position/set std_msgs/msg/Float32 'data: 12.2'
+ros2 topic pub /elmo/id2/lift/position/set std_msgs/msg/Float32 'data: 0.24'
 
 ros2 run meeseeks transcriber
 ros2 run meeseeks voice_cli_publisher
@@ -153,3 +166,6 @@ ros2 run controller_manager spawner gripper_controller --controller-manager /con
 ## check if they really spawned
 ros2 control list_controllers | grep -i gripper
 
+ros2 topic list | grep -E "robot_control_state|arm_armed"
+ros2 topic echo --once /robot_control_state
+ros2 topic echo --once /arm_armed

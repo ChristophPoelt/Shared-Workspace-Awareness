@@ -48,7 +48,7 @@ class RobotInitializationNode(Node):
         self.min_move_duration_s = self._positive_param("min_move_duration_s", 2.0)
         self.max_move_duration_s = self._positive_param("max_move_duration_s", 12.0)
         self.fallback_move_duration_s = self._positive_param("fallback_move_duration_s", 8.0)
-        self.joint_state_wait_timeout_s = self._nonnegative_param("joint_state_wait_timeout_s", 1.0)
+        self.joint_state_wait_timeout_s = self._nonnegative_param("joint_state_wait_timeout_s", 5.0)
         self.publish_gating_topics = bool(self.get_parameter("publish_gating_topics").value)
         self.ready_publish_delay_s = self._nonnegative_param("ready_publish_delay_s", 0.2)
         if self.max_move_duration_s < self.min_move_duration_s:
