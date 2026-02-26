@@ -462,9 +462,11 @@ class PointJoint1Node(Node):
         self._arm_armed_sub = self.create_subscription(Bool, "/arm_armed", self._on_arm_armed, state_qos)
 
         self.current_joint_state = None
+        self.current_arm_joint_positions = None
         self.current_rail_pos = self.fixed_rail_pos
         self.has_carriage_feedback = False
-        self._missing_joints_warned = False
+        self._arm_joint_state_valid = False
+        self._last_joint_missing_signature = None
         self._last_sent_yaw = None
         self._suppress_next_empty_target_msg = False
         self._aborted_target_to_ignore_once = None
@@ -666,14 +668,11 @@ class PointJoint1Node(Node):
         if self.current_joint_state is None:
             self._log_abort_fold_pending("waiting for /joint_states")
             return
-
-        name_to_position = dict(zip(self.current_joint_state.name, self.current_joint_state.position))
-        missing_joints = [j for j in ARM_JOINT_NAMES if j not in name_to_position]
-        if missing_joints:
-            self._log_abort_fold_pending(f"missing joints in /joint_states: {missing_joints}")
+        if self.current_arm_joint_positions is None:
+            self._log_abort_fold_pending("waiting for arm joints in /joint_states")
             return
 
-        current_positions = [float(name_to_position[j]) for j in ARM_JOINT_NAMES]
+        current_positions = list(self.current_arm_joint_positions)
         desired = list(current_positions)
         desired[0] = current_positions[0]
         desired[1:] = [float(v) for v in self.folded_pose[1:]]
@@ -775,8 +774,39 @@ class PointJoint1Node(Node):
     # ----------------------
     # Callbacks
     # ----------------------
+    def _extract_arm_joint_positions(self, msg: JointState):
+        name_to_index = {name: i for i, name in enumerate(msg.name)}
+        missing = []
+        positions = []
+        for joint_name in ARM_JOINT_NAMES:
+            idx = name_to_index.get(joint_name)
+            if idx is None or idx >= len(msg.position):
+                missing.append(joint_name)
+                continue
+            positions.append(float(msg.position[idx]))
+        if missing:
+            return None, missing
+        return positions, None
+
     def joint_state_cb(self, msg: JointState):
         self.current_joint_state = msg
+        arm_positions, missing_joints = self._extract_arm_joint_positions(msg)
+        if missing_joints:
+            self.current_arm_joint_positions = None
+            self._arm_joint_state_valid = False
+            signature = (tuple(missing_joints), tuple(msg.name))
+            if signature != self._last_joint_missing_signature:
+                self._last_joint_missing_signature = signature
+                self.get_logger().warn(f"[JOINT] missing={missing_joints} names={list(msg.name)}")
+            return
+
+        self.current_arm_joint_positions = arm_positions
+        self._last_joint_missing_signature = None
+        if not self._arm_joint_state_valid:
+            self.get_logger().info(
+                f"[JOINT] ok joint_1={arm_positions[0]:.3f} names_len={len(msg.name)}"
+            )
+        self._arm_joint_state_valid = True
 
     def carriage_pos_cb(self, msg: Float64):
         if not self.has_carriage_feedback:
@@ -980,6 +1010,9 @@ class PointJoint1Node(Node):
         if self.current_joint_state is None:
             self._log_blocked(now, "waiting for /joint_states")
             return
+        if self.current_arm_joint_positions is None:
+            self._log_blocked(now, "waiting for arm joints in /joint_states")
+            return
 
         if self.current_target is None:
             if not self._topic_has_publishers(self._target_sub):
@@ -1002,16 +1035,7 @@ class PointJoint1Node(Node):
             target_pos_raw=target_pos,
         )
 
-        name_to_position = dict(zip(self.current_joint_state.name, self.current_joint_state.position))
-        missing_joints = [j for j in ARM_JOINT_NAMES if j not in name_to_position]
-        if missing_joints:
-            if not self._missing_joints_warned:
-                self.get_logger().warn(f"Missing joints in /joint_states: {missing_joints}")
-                self._missing_joints_warned = True
-            return
-        self._missing_joints_warned = False
-
-        current_positions = [float(name_to_position[j]) for j in ARM_JOINT_NAMES]
+        current_positions = list(self.current_arm_joint_positions)
         current_joint1 = current_positions[0]
         ref = self._last_sent_yaw if self._last_sent_yaw is not None else current_joint1
         yaw_cmd = ref + shortest_angle_diff(yaw_angle, ref)

@@ -21,6 +21,7 @@ VOICE_COMMAND_TOPIC_DEFAULT = "/voice_commands"
 DIALOGUE_WAIT_SELECT = "WAIT_SELECT"
 DIALOGUE_WAIT_CONFIRM = "WAIT_CONFIRM"
 DIALOGUE_WAIT_DISPATCH = "WAIT_DISPATCH"
+ARM_JOINT_NAMES = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
 
 class GestureController:
     """Wrapper around RobotGestures Trigger services."""
@@ -189,6 +190,7 @@ class MainLogic(Node):
 
         # ─── State tracking ────────────────────────────────────────────────
         self.current_carriage_pos = None
+        self.current_arm_joint_positions = None
         self.state = "initializing"  # initializing, ready, paused, aborted
         self._state_lock = threading.RLock()
         self.pause_wait_s = 30.0
@@ -199,6 +201,8 @@ class MainLogic(Node):
         self._arm_armed = False
         self._joint_states_seen = 0
         self._joint_states_required_for_arming = 2
+        self._arm_joint_state_valid = False
+        self._last_joint_missing_signature = None
         self._robot_init_done = False
         self._last_select_time = 0.0
         self._select_cooldown_s = 1.0
@@ -472,7 +476,11 @@ class MainLogic(Node):
         with self._state_lock:
             self.get_logger().info("[TARGET] WHERE ARE YOU GOING?")
             self.get_logger().info(f"[TARGET] current target: {self._pending_target}")
-            if self.current_carriage_pos is not None:
+            if self.current_arm_joint_positions is not None:
+                self.get_logger().info(
+                    f"[TARGET] current position (joint_1): {self.current_arm_joint_positions[0]:.3f}"
+                )
+            elif self.current_carriage_pos is not None:
                 self.get_logger().info(f"[TARGET] current position: {self.current_carriage_pos:.3f}")
             else:
                 self.get_logger().info("[TARGET] current position: unknown (no data yet)")
@@ -529,7 +537,39 @@ class MainLogic(Node):
     def _on_carriage_position(self, msg: Float64) -> None:
         self.current_carriage_pos = msg.data
 
-    def _on_joint_states_for_arming(self, _msg: JointState) -> None:
+    def _extract_arm_joint_positions(self, msg: JointState):
+        name_to_index = {name: i for i, name in enumerate(msg.name)}
+        missing = []
+        positions = []
+        for joint_name in ARM_JOINT_NAMES:
+            idx = name_to_index.get(joint_name)
+            if idx is None or idx >= len(msg.position):
+                missing.append(joint_name)
+                continue
+            positions.append(float(msg.position[idx]))
+        if missing:
+            return None, missing
+        return positions, None
+
+    def _on_joint_states_for_arming(self, msg: JointState) -> None:
+        arm_positions, missing_joints = self._extract_arm_joint_positions(msg)
+        if missing_joints:
+            self.current_arm_joint_positions = None
+            self._arm_joint_state_valid = False
+            signature = (tuple(missing_joints), tuple(msg.name))
+            if signature != self._last_joint_missing_signature:
+                self._last_joint_missing_signature = signature
+                self.get_logger().warn(f"[JOINT] missing={missing_joints} names={list(msg.name)}")
+            return
+
+        self.current_arm_joint_positions = arm_positions
+        self._last_joint_missing_signature = None
+        if not self._arm_joint_state_valid:
+            self.get_logger().info(
+                f"[JOINT] ok joint_1={arm_positions[0]:.3f} names_len={len(msg.name)}"
+            )
+        self._arm_joint_state_valid = True
+
         if self._arm_armed:
             return
 
