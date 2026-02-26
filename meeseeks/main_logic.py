@@ -29,6 +29,18 @@ class GestureController:
         self._cli_target_selected_blocking = node.create_client(
             Trigger, "/gesture/target_selected_blocking", callback_group=cb_group
         )
+        self._cli_wipe = node.create_client(
+            Trigger, "/gesture/wipe", callback_group=cb_group
+        )
+        self._cli_wipe_blocking = node.create_client(
+            Trigger, "/gesture/wipe_blocking", callback_group=cb_group
+        )
+        self._cli_grab = node.create_client(
+            Trigger, "/gesture/grab", callback_group=cb_group
+        )
+        self._cli_grab_blocking = node.create_client(
+            Trigger, "/gesture/grab_blocking", callback_group=cb_group
+        )
         self._cli_pause = node.create_client(
             Trigger, "/gesture/pause", callback_group=cb_group
         )
@@ -65,14 +77,15 @@ class GestureController:
         self._call_async(self._cli_target_selected, "/gesture/target_selected")
 
     def target_selected_blocking(self) -> bool:
-        client = self._cli_target_selected_blocking
-        label = "/gesture/target_selected_blocking"
+        return self._call_blocking(self._cli_target_selected_blocking, "/gesture/target_selected_blocking")
+
+    def _call_blocking(self, client, label: str, timeout_s: float = 30.0) -> bool:
         if not client.service_is_ready():
             if not client.wait_for_service(timeout_sec=1.0):
                 self._node.get_logger().warn(f"[GESTURE] service not available: {label}")
                 return False
         future = client.call_async(Trigger.Request())
-        deadline = time.monotonic() + 30.0
+        deadline = time.monotonic() + max(0.5, float(timeout_s))
         while not future.done():
             if time.monotonic() >= deadline:
                 self._node.get_logger().warn(f"[GESTURE] {label}: timeout waiting for response")
@@ -89,6 +102,34 @@ class GestureController:
         msg = resp.message if resp else "no response"
         self._node.get_logger().warn(f"[GESTURE] {label}: FAIL ({msg})")
         return False
+
+    def _call_prefer_blocking(self, blocking_client, blocking_label: str, async_client, async_label: str) -> bool:
+        if blocking_client.service_is_ready():
+            return self._call_blocking(blocking_client, blocking_label)
+        if blocking_client.wait_for_service(timeout_sec=0.3):
+            return self._call_blocking(blocking_client, blocking_label)
+        self._node.get_logger().warn(
+            f"[GESTURE] {blocking_label} unavailable; falling back to {async_label} + fixed wait"
+        )
+        self._call_async(async_client, async_label)
+        time.sleep(1.5)
+        return True
+
+    def wipe_blocking_prefer(self) -> bool:
+        return self._call_prefer_blocking(
+            self._cli_wipe_blocking,
+            "/gesture/wipe_blocking",
+            self._cli_wipe,
+            "/gesture/wipe",
+        )
+
+    def grab_blocking_prefer(self) -> bool:
+        return self._call_prefer_blocking(
+            self._cli_grab_blocking,
+            "/gesture/grab_blocking",
+            self._cli_grab,
+            "/gesture/grab",
+        )
 
     def pause(self) -> None:
         self._call_async(self._cli_pause, "/gesture/pause")
@@ -147,6 +188,8 @@ class MainLogic(Node):
         self._select_cooldown_s = 1.0
         self._pending_target = None
         self._pending_target_confirmed = False
+        self._pre_move_gesture_running = False
+        self._next_what_gesture = "wipe"
         self._publish_control_state()
         self._publish_arm_armed()
 
@@ -244,6 +287,8 @@ class MainLogic(Node):
                 return
             self._last_select_time = now
             self.select_target_command_logic()
+        elif cmd == "what" or cmd == "what are you doing" or ("what" in cmd and "doing" in cmd):
+            self.what_are_you_doing_logic()
         elif cmd in ("where", "confirm") or ("where" in cmd and "going" in cmd):
             self.where_are_you_going_logic()
         elif "continue" in cmd:
@@ -264,8 +309,10 @@ class MainLogic(Node):
             self._target_indication()
             self._pending_target = target
             self._pending_target_confirmed = False
+            self._pre_move_gesture_running = True
             state_at_select = self.state
             if state_at_select == "paused":
+                self._pre_move_gesture_running = False
                 self.get_logger().info(
                     f"Target selected while state={self.state}; motion remains blocked until resume/continue. "
                     "Skipping target-selected gesture while blocked."
@@ -277,6 +324,7 @@ class MainLogic(Node):
 
         gesture_ok = self.gesture.target_selected_blocking()
         with self._state_lock:
+            self._pre_move_gesture_running = False
             if self._pending_target != target:
                 self.get_logger().info(
                     f"[TARGET] select result became stale while waiting for gesture (target={target})"
@@ -303,6 +351,45 @@ class MainLogic(Node):
                 self.get_logger().info(
                     f"[TARGET] select gesture finished; waiting for 'where are you going' to start motion "
                     f"(target={gv.currentTargetGlobal})"
+                )
+
+    def what_are_you_doing_logic(self) -> None:
+        with self._state_lock:
+            if self._pending_target is None or self._pending_target_confirmed:
+                self.get_logger().info(
+                    "[GESTURE] 'what' ignored: only allowed after select and before confirm/motion start"
+                )
+                return
+            if self._pre_move_gesture_running:
+                self.get_logger().info("[GESTURE] 'what' ignored: another pre-move gesture is still running")
+                return
+            gesture_name = self._next_what_gesture
+            self._pre_move_gesture_running = True
+
+        try:
+            if gesture_name == "wipe":
+                ok = self.gesture.wipe_blocking_prefer()
+            else:
+                ok = self.gesture.grab_blocking_prefer()
+        finally:
+            with self._state_lock:
+                self._pre_move_gesture_running = False
+
+        with self._state_lock:
+            if self._pending_target is None or self._pending_target_confirmed:
+                self.get_logger().info(
+                    f"[GESTURE] pre-move '{gesture_name}' completed but pre-move window already closed"
+                )
+                return
+            if ok:
+                self._next_what_gesture = "grab" if gesture_name == "wipe" else "wipe"
+                self.get_logger().info(
+                    f"[GESTURE] pre-move 'what' gesture executed: {gesture_name} "
+                    f"(next={self._next_what_gesture})"
+                )
+            else:
+                self.get_logger().warn(
+                    f"[GESTURE] pre-move 'what' gesture failed: {gesture_name} (will retry same next time)"
                 )
 
     def abort_command_logic(self) -> None:
@@ -344,6 +431,11 @@ class MainLogic(Node):
                 self.get_logger().info(f"[TARGET] current position: {self.current_carriage_pos:.3f}")
             else:
                 self.get_logger().info("[TARGET] current position: unknown (no data yet)")
+            if self._pre_move_gesture_running:
+                self.get_logger().info(
+                    "[TARGET] confirmation deferred: pre-move gesture still running"
+                )
+                return
             if self._pending_target is None:
                 self.get_logger().warn("[TARGET] no pending target to confirm (say 'select' first)")
                 return
