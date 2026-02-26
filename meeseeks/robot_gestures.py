@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import math
 import time
 import threading
 import os
@@ -138,6 +139,7 @@ class RobotGestures(Node):
         )
         self.create_service(Trigger, "/gesture/pause", self._on_pause)
         self.create_service(Trigger, "/gesture/resume", self._on_resume)
+        self.create_service(Trigger, "/gesture/open", self._on_open)
         self.create_service(Trigger, "/gesture/abort", self._on_abort)
         self.create_timer(5.0, self._warn_on_duplicate_node_names)
 
@@ -145,6 +147,8 @@ class RobotGestures(Node):
         self.create_service(Trigger, "/gesture/wipe_blocking", self._on_wipe_blocking)
         self.create_service(Trigger, "/gesture/grab", self._on_grab)
         self.create_service(Trigger, "/gesture/grab_blocking", self._on_grab_blocking)
+        self.create_service(Trigger, "/gesture/target_reached", self._on_target_reached)
+        self.create_service(Trigger, "/gesture/target_reached_blocking", self._on_target_reached_blocking)
 
         # --------------------------
         # Log startup
@@ -287,8 +291,25 @@ class RobotGestures(Node):
                 return response
             self._paused = False
 
+        try:
+            self._send_gripper_no_wait(self._open_pos)
+        except Exception as e:
+            self.get_logger().warn(f"[GESTURE] resume: failed to send gripper open (best-effort): {e}")
+
         response.success = True
-        response.message = "Resumed."
+        response.message = "Resumed. Gripper open command sent (best-effort)."
+        return response
+
+    def _on_open(self, request, response):
+        self.get_logger().info("[GESTURE] service hit: /gesture/open")
+        try:
+            self._send_gripper_no_wait(self._open_pos)
+            response.success = True
+            response.message = "Open command sent."
+        except Exception as e:
+            self.get_logger().warn(f"[GESTURE] open: failed to send gripper open: {e}")
+            response.success = False
+            response.message = f"Open: failed to send open: {e}"
         return response
 
     def _on_abort(self, request, response):
@@ -500,9 +521,90 @@ class RobotGestures(Node):
                 self._paused = False
                 self._abort_requested = False
 
+    def _run_target_reached_sequence(self):
+        """
+        joint_6 += pi/2 -> gripper CLOSE/OPEN -> joint_6 back to baseline.
+        """
+        try:
+            self.get_logger().info(
+                "[GESTURE] sequence target_reached: joint_6 +90deg -> CLOSE -> OPEN -> joint_6 return"
+            )
+            (
+                joint_names,
+                used_joint_name,
+                used_joint_idx,
+                baseline,
+                targets,
+            ) = self._single_joint_gesture_targets("joint_6", [0.0, math.pi / 2.0, 0.0])
+            forward_target = targets[1]
+            return_target = targets[2]
+            forward_value = float(forward_target[used_joint_idx])
+            return_value = float(return_target[used_joint_idx])
+
+            self.get_logger().info(
+                f"[GESTURE] target_reached joint={used_joint_name} baseline={baseline:.4f} "
+                f"forward={forward_value:.4f} return={return_value:.4f}"
+            )
+
+            self._check_abort_or_pause()
+            self._publish_arm_target_named(joint_names, forward_target, self._arm_move_s)
+            self._sleep_with_checks(self._arm_move_s)
+
+            self._check_abort_or_pause()
+            self._send_gripper_no_wait(self._close_pos)
+            self._sleep_with_checks(self._pause_s)
+
+            self._check_abort_or_pause()
+            self._send_gripper_no_wait(self._open_pos)
+
+            self._check_abort_or_pause()
+            self._publish_arm_target_named(joint_names, return_target, self._arm_move_s)
+            self._sleep_with_checks(self._arm_move_s)
+
+            self.get_logger().info("[RESULT] target_reached sequence done")
+            return True, "Completed: target_reached gesture."
+        except RuntimeError as e:
+            self.get_logger().warn(f"[RESULT] target_reached stopped: {e}")
+            return False, f"Stopped: {e}"
+        except Exception as e:
+            self.get_logger().error(f"[RESULT] target_reached failed: {e}")
+            return False, f"Failed: {e}"
+        finally:
+            with self._lock:
+                self._busy = False
+                self._paused = False
+                self._abort_requested = False
+
     # --------------------------
     # Wipe services
     # --------------------------
+    def _on_target_reached(self, request, response):
+        self.get_logger().info("[GESTURE] service hit: /gesture/target_reached")
+        ok, msg = self._begin_sequence("target_reached")
+        if not ok:
+            response.success = False
+            response.message = msg
+            return response
+
+        threading.Thread(target=self._run_target_reached_sequence, daemon=True).start()
+
+        response.success = True
+        response.message = msg
+        return response
+
+    def _on_target_reached_blocking(self, request, response):
+        self.get_logger().info("[GESTURE] service hit: /gesture/target_reached_blocking")
+        ok, msg = self._begin_sequence("target_reached")
+        if not ok:
+            response.success = False
+            response.message = msg
+            return response
+
+        ok2, msg2 = self._run_target_reached_sequence()
+        response.success = ok2
+        response.message = msg2
+        return response
+
     def _on_wipe(self, request, response):
         self.get_logger().info("[GESTURE] service hit: /gesture/wipe")
         ok, msg = self._begin_sequence("wipe")

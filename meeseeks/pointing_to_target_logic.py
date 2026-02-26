@@ -452,6 +452,7 @@ class PointJoint1Node(Node):
         )
 
         self.current_target = None
+        self._target_pub = self.create_publisher(String, "/selected_target", target_qos)
         self._target_sub = self.create_subscription(String, "/selected_target", self._on_target, target_qos)
         self.control_state = "initializing"
         self._control_state_sub = self.create_subscription(
@@ -465,6 +466,11 @@ class PointJoint1Node(Node):
         self.has_carriage_feedback = False
         self._missing_joints_warned = False
         self._last_sent_yaw = None
+        self._suppress_next_empty_target_msg = False
+        self._aborted_target_to_ignore_once = None
+        self._ignore_one_target_after_abort_resume = False
+        self._abort_fold_requested = False
+        self._abort_fold_wait_reason = None
 
         self.phase = "idle"  # idle|folding|turning|stretching
         self._sequence_generation = 0
@@ -491,7 +497,7 @@ class PointJoint1Node(Node):
         self._last_blocked_reason = None
         self._last_blocked_log_s = 0.0
         self._blocked_log_repeat_s = 10.0
-        self._gesture_target_selected_cli = self.create_client(Trigger, "/gesture/target_selected")
+        self._gesture_target_reached_cli = self.create_client(Trigger, "/gesture/target_reached")
 
         self.arm_backend = MoveItArmBackend(
             self,
@@ -620,8 +626,8 @@ class PointJoint1Node(Node):
         future.add_done_callback(_done_cb)
 
     def _trigger_post_stretch_gesture(self, reason: str) -> None:
-        self.get_logger().info(f"[GESTURE] triggering post-stretch target_selected ({reason})")
-        self._call_trigger_async(self._gesture_target_selected_cli, "/gesture/target_selected")
+        self.get_logger().info(f"[GESTURE] calling /gesture/target_reached (reached target; {reason})")
+        self._call_trigger_async(self._gesture_target_reached_cli, "/gesture/target_reached")
 
     def _request_stop(self, reason: str) -> None:
         self.arm_backend.stop(reason)
@@ -629,8 +635,94 @@ class PointJoint1Node(Node):
         now = self.get_clock().now().nanoseconds * 1e-9
         self._cooldown_until = max(self._cooldown_until, now + min(self.replan_cooldown_s, 0.2))
 
+    def _publish_cleared_target(self) -> None:
+        self._suppress_next_empty_target_msg = True
+        msg = String()
+        msg.data = ""
+        self._target_pub.publish(msg)
+        self.get_logger().info("[ABORT] cleared selected_target")
+
+    def _clear_active_target_after_abort(self) -> None:
+        aborted_target = self.current_target if self.current_target else None
+        self._aborted_target_to_ignore_once = aborted_target
+        self._ignore_one_target_after_abort_resume = False
+        self.current_target = None
+        self._last_sent_yaw = None
+        self._set_phase("idle", reason="abort cleared target")
+        self._publish_cleared_target()
+
+    def _log_abort_fold_pending(self, reason: str) -> None:
+        if reason == self._abort_fold_wait_reason:
+            return
+        self._abort_fold_wait_reason = reason
+        self.get_logger().warn(f"[ABORT] return-to-fold pending: {reason}")
+
+    def _try_dispatch_abort_fold(self, now: Optional[float] = None) -> None:
+        if not self._abort_fold_requested:
+            return
+        if self.arm_backend.is_busy():
+            self._log_abort_fold_pending("waiting for current MoveIt goal cancel/result")
+            return
+        if self.current_joint_state is None:
+            self._log_abort_fold_pending("waiting for /joint_states")
+            return
+
+        name_to_position = dict(zip(self.current_joint_state.name, self.current_joint_state.position))
+        missing_joints = [j for j in ARM_JOINT_NAMES if j not in name_to_position]
+        if missing_joints:
+            self._log_abort_fold_pending(f"missing joints in /joint_states: {missing_joints}")
+            return
+
+        current_positions = [float(name_to_position[j]) for j in ARM_JOINT_NAMES]
+        desired = list(current_positions)
+        desired[0] = current_positions[0]
+        desired[1:] = [float(v) for v in self.folded_pose[1:]]
+
+        sent = self.arm_backend.send_joint_goal(
+            phase="abort_folding",
+            context_id=self._sequence_generation,
+            desired_positions=desired,
+            start_joint_state=self.current_joint_state,
+            stretch_joint1_path_constraint=None,
+        )
+        if not sent:
+            self._log_abort_fold_pending("unable to dispatch folded pose goal (MoveIt busy/server unavailable)")
+            if now is not None:
+                self._cooldown_until = max(self._cooldown_until, now + self.replan_cooldown_s)
+            return
+
+        self._abort_fold_requested = False
+        self._abort_fold_wait_reason = None
+        if now is not None:
+            self._cooldown_until = max(self._cooldown_until, now + self.replan_cooldown_s)
+        self.get_logger().info("[ABORT] commanded folded pose via MoveIt folded target")
+
     def _on_target(self, msg):
         new_target = (msg.data or "").strip()
+        if not new_target:
+            if self._suppress_next_empty_target_msg:
+                self._suppress_next_empty_target_msg = False
+                return
+            self.current_target = None
+            self._aborted_target_to_ignore_once = None
+            self._ignore_one_target_after_abort_resume = False
+            self._bump_sequence_generation("target cleared")
+            self._request_stop("target cleared")
+            self._set_phase("idle", reason="target cleared")
+            self.get_logger().info("[TARGET] cleared selected_target -> waiting for new target")
+            return
+
+        if self._ignore_one_target_after_abort_resume:
+            if new_target == self._aborted_target_to_ignore_once:
+                self.get_logger().info(
+                    f"[CONTINUE] ignoring resumed target after abort: {new_target}; waiting for new target selection"
+                )
+                self._ignore_one_target_after_abort_resume = False
+                self._aborted_target_to_ignore_once = None
+                return
+            self._ignore_one_target_after_abort_resume = False
+            self._aborted_target_to_ignore_once = None
+
         self.current_target = new_target
         self._bump_sequence_generation(f"target={self.current_target}")
         self._request_stop("target change")
@@ -641,14 +733,32 @@ class PointJoint1Node(Node):
         new_state = (msg.data or "").strip() or "ready"
         if new_state == self.control_state:
             return
+        prev_state = self.control_state
         self.control_state = new_state
-        if self.control_state in {"paused", "aborted"}:
+        if self.control_state == "aborted":
+            self.get_logger().info("[ABORT] canceling current target + returning to folded pose")
+            self._bump_sequence_generation("control_state=aborted")
+            self._request_stop("control_state=aborted")
+            self._clear_active_target_after_abort()
+            self._abort_fold_requested = True
+            self._abort_fold_wait_reason = None
+            now = self.get_clock().now().nanoseconds * 1e-9
+            self._try_dispatch_abort_fold(now)
+            return
+        if self.control_state == "paused":
             self.get_logger().info(f"[GATE] control_state={self.control_state} -> cancel in-flight motion")
-            self._bump_sequence_generation(f"control_state={self.control_state}")
-            self._request_stop(f"control_state={self.control_state}")
+            self._bump_sequence_generation("control_state=paused")
+            self._request_stop("control_state=paused")
             return
         if self.control_state == "ready":
-            self.get_logger().info(f"[GATE] control_state=ready (resume phase={self.phase})")
+            if prev_state == "aborted":
+                self.current_target = None
+                self._set_phase("idle", reason="abort complete")
+                self._ignore_one_target_after_abort_resume = False
+                self._aborted_target_to_ignore_once = None
+                self.get_logger().info("[GATE] control_state=ready after abort; waiting for new target")
+            else:
+                self.get_logger().info(f"[GATE] control_state=ready (resume phase={self.phase})")
             return
         self.get_logger().info(f"[GATE] control_state={self.control_state}")
 
@@ -744,7 +854,9 @@ class PointJoint1Node(Node):
             return
 
         if outcome.status == "succeeded":
-            if outcome.phase == "folding":
+            if outcome.phase == "abort_folding":
+                self.get_logger().info("[ABORT] folded pose command complete")
+            elif outcome.phase == "folding":
                 self._set_phase("turning", reason="fold move complete")
             elif outcome.phase == "turning":
                 self._set_phase("stretching", reason="turn move complete")
@@ -844,6 +956,7 @@ class PointJoint1Node(Node):
     def update_joint1(self):
         now = self.get_clock().now().nanoseconds * 1e-9
         self._consume_backend_outcome(now)
+        self._try_dispatch_abort_fold(now)
 
         ready_ok, ready_reason = self._effective_ready(now)
         if not ready_ok:

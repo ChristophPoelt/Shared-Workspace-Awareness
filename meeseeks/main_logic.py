@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import re
 import threading
 import time
 
@@ -17,6 +18,9 @@ from meeseeks.targetSelection import selectNewTarget
 import meeseeks.globalVariables as gv
 
 VOICE_COMMAND_TOPIC_DEFAULT = "/voice_commands"
+DIALOGUE_WAIT_SELECT = "WAIT_SELECT"
+DIALOGUE_WAIT_CONFIRM = "WAIT_CONFIRM"
+DIALOGUE_WAIT_DISPATCH = "WAIT_DISPATCH"
 
 class GestureController:
     """Wrapper around RobotGestures Trigger services."""
@@ -47,12 +51,18 @@ class GestureController:
         self._cli_resume = node.create_client(
             Trigger, "/gesture/resume", callback_group=cb_group
         )
+        self._cli_open = node.create_client(
+            Trigger, "/gesture/open", callback_group=cb_group
+        )
         self._cli_abort = node.create_client(
             Trigger, "/gesture/abort", callback_group=cb_group
         )
 
-    def _call_async(self, client, label: str) -> None:
+    def _call_async(self, client, label: str, wait_for_service: bool = True) -> None:
         if not client.service_is_ready():
+            if not wait_for_service:
+                self._node.get_logger().warn(f"[GESTURE] service not available: {label}")
+                return
             if not client.wait_for_service(timeout_sec=1.0):
                 self._node.get_logger().warn(f"[GESTURE] service not available: {label}")
                 return
@@ -137,6 +147,12 @@ class GestureController:
     def resume(self) -> None:
         self._call_async(self._cli_resume, "/gesture/resume")
 
+    def resume_no_wait(self) -> None:
+        self._call_async(self._cli_resume, "/gesture/resume", wait_for_service=False)
+
+    def open_no_wait(self) -> None:
+        self._call_async(self._cli_open, "/gesture/open", wait_for_service=False)
+
     def abort(self) -> None:
         self._call_async(self._cli_abort, "/gesture/abort")
 
@@ -190,6 +206,9 @@ class MainLogic(Node):
         self._pending_target_confirmed = False
         self._pre_move_gesture_running = False
         self._next_what_gesture = "wipe"
+        self._dialogue_state = DIALOGUE_WAIT_SELECT
+        self._abort_auto_ready_delay_s = 0.75
+        self._abort_auto_ready_timer = None
         self._publish_control_state()
         self._publish_arm_armed()
 
@@ -269,16 +288,17 @@ class MainLogic(Node):
     def _on_voice_command(self, msg: String) -> None:
         raw = (msg.data or "").strip()
         cmd = raw.lower()
+        norm_cmd = self._normalize_voice_text(raw)
         if not cmd:
             return
 
         self.get_logger().info(f"[INIT] voice command received: '{raw}'")
 
-        if "abort" in cmd:
+        if "abort" in norm_cmd or "stop" in norm_cmd:
             self.abort_command_logic()
-        elif "pause" in cmd:
+        elif "pause" in norm_cmd or "hold" in norm_cmd or "wait" in norm_cmd:
             self.pause_command_logic()
-        elif cmd in ("select", "target") or cmd.startswith("select "):
+        elif norm_cmd in ("select", "target") or norm_cmd.startswith("select "):
             now = time.monotonic()
             if now - self._last_select_time < self._select_cooldown_s:
                 self.get_logger().info(
@@ -287,17 +307,27 @@ class MainLogic(Node):
                 return
             self._last_select_time = now
             self.select_target_command_logic()
-        elif cmd == "what" or cmd == "what are you doing" or ("what" in cmd and "doing" in cmd):
+        elif self._is_what_phrase(norm_cmd):
             self.what_are_you_doing_logic()
-        elif cmd in ("where", "confirm") or ("where" in cmd and "going" in cmd):
+        elif self._is_confirm_phrase(norm_cmd):
             self.where_are_you_going_logic()
-        elif "continue" in cmd:
+        elif "continue" in norm_cmd or "resume" in norm_cmd:
             self.continue_logic()
         else:
             self.get_logger().warn(f"Unknown voice command: '{raw}'")
 
     def select_target_command_logic(self) -> None:
         with self._state_lock:
+            if self._dialogue_state == DIALOGUE_WAIT_CONFIRM and self._pending_target is not None:
+                self.get_logger().info(
+                    f"[GATE] ignoring 'select' while waiting for confirm (pending_target={self._pending_target})"
+                )
+                return
+            if self._dialogue_state == DIALOGUE_WAIT_DISPATCH and self._pending_target is not None:
+                self.get_logger().info(
+                    f"[GATE] ignoring 'select' while pending target is dispatching (pending_target={self._pending_target})"
+                )
+                return
             initial = gv.currentTargetGlobal is None
             target = self._select_new_target_safe(
                 initial=initial,
@@ -309,6 +339,7 @@ class MainLogic(Node):
             self._target_indication()
             self._pending_target = target
             self._pending_target_confirmed = False
+            self._dialogue_state = DIALOGUE_WAIT_CONFIRM
             self._pre_move_gesture_running = True
             state_at_select = self.state
             if state_at_select == "paused":
@@ -355,9 +386,14 @@ class MainLogic(Node):
 
     def what_are_you_doing_logic(self) -> None:
         with self._state_lock:
-            if self._pending_target is None or self._pending_target_confirmed:
+            if self._pending_target is None:
                 self.get_logger().info(
-                    "[GESTURE] 'what' ignored: only allowed after select and before confirm/motion start"
+                    "[GATE] 'what' ignored: no pending target; say 'select' first"
+                )
+                return
+            if self._dialogue_state != DIALOGUE_WAIT_CONFIRM or self._pending_target_confirmed:
+                self.get_logger().info(
+                    "[GATE] 'what' ignored: only allowed while waiting for confirm"
                 )
                 return
             if self._pre_move_gesture_running:
@@ -376,9 +412,14 @@ class MainLogic(Node):
                 self._pre_move_gesture_running = False
 
         with self._state_lock:
-            if self._pending_target is None or self._pending_target_confirmed:
+            if self._pending_target is None:
                 self.get_logger().info(
                     f"[GESTURE] pre-move '{gesture_name}' completed but pre-move window already closed"
+                )
+                return
+            if self._dialogue_state != DIALOGUE_WAIT_CONFIRM or self._pending_target_confirmed:
+                self.get_logger().info(
+                    f"[GESTURE] pre-move '{gesture_name}' completed but dialogue is no longer waiting for confirm"
                 )
                 return
             if ok:
@@ -396,15 +437,19 @@ class MainLogic(Node):
         with self._state_lock:
             self.get_logger().info("[GATE] ABORT requested: stopping all operations")
             if self.state == "aborted":
-                self.get_logger().warn("[GATE] robot is already aborted; waiting for continue")
+                self.get_logger().warn("[GATE] robot is already aborted; auto-ready timer already in progress")
                 return
 
-            self._resume_state_after_abort = self.state
-            self._suspended_deadline_remaining = self._remaining_deadline_seconds()
+            self._resume_state_after_abort = None
+            self._suspended_deadline_remaining = None
             self._state_deadline = None
+            self._clear_pending_target_after_abort()
             self._set_state("aborted")
             self.gesture.abort()
-            self.get_logger().info("[GATE] robot aborted and frozen (waiting for continue command)")
+            self._schedule_abort_auto_ready()
+            self.get_logger().info(
+                f"[GATE] robot aborted; will auto-return to ready in {self._abort_auto_ready_delay_s:.2f}s"
+            )
 
     def pause_command_logic(self) -> None:
         with self._state_lock:
@@ -426,7 +471,7 @@ class MainLogic(Node):
     def where_are_you_going_logic(self) -> None:
         with self._state_lock:
             self.get_logger().info("[TARGET] WHERE ARE YOU GOING?")
-            self.get_logger().info(f"[TARGET] current target: {gv.currentTargetGlobal}")
+            self.get_logger().info(f"[TARGET] current target: {self._pending_target}")
             if self.current_carriage_pos is not None:
                 self.get_logger().info(f"[TARGET] current position: {self.current_carriage_pos:.3f}")
             else:
@@ -439,25 +484,44 @@ class MainLogic(Node):
             if self._pending_target is None:
                 self.get_logger().warn("[TARGET] no pending target to confirm (say 'select' first)")
                 return
+            if self._dialogue_state != DIALOGUE_WAIT_CONFIRM:
+                self.get_logger().info(
+                    f"[GATE] confirm ignored: dialogue_state={self._dialogue_state} "
+                    f"(pending_target={self._pending_target})"
+                )
+                return
             self._pending_target_confirmed = True
+            self._dialogue_state = DIALOGUE_WAIT_DISPATCH
             self.get_logger().info(
                 f"[TARGET] confirmation received for pending target: {self._pending_target}"
             )
             self._publish_pending_target_if_ready()
 
     def continue_logic(self) -> None:
+        reopen_gripper = False
         with self._state_lock:
             self.get_logger().info("[GATE] CONTINUE requested: resuming robot movement")
             if self.state == "paused":
                 self._resume_from_pause(auto=False)
-                self.gesture.resume()
                 self.get_logger().info("[GATE] robot resumed")
+                reopen_gripper = True
             elif self.state == "aborted":
-                self._resume_from_abort()
-                self._publish_pending_target_if_ready()
-                self.get_logger().info("[GATE] robot continued after abort")
+                self._cancel_abort_auto_ready_timer()
+                self._clear_pending_target_after_abort()
+                next_state = "ready" if self._arm_armed else "initializing"
+                self._set_state(next_state)
+                if next_state == "ready":
+                    self.get_logger().info("[CONTINUE] ready for new target (no active target to resume)")
+                else:
+                    self.get_logger().info("[CONTINUE] arm not ready yet; staying initializing")
+            elif self.state == "ready":
+                self.get_logger().info("[CONTINUE] already ready")
             else:
                 self.get_logger().warn(f"[GATE] nothing to resume (state={self.state})")
+
+        if reopen_gripper:
+            self.gesture.open_no_wait()
+            self.get_logger().info("[VOICE] continue -> called /gesture/open to reopen gripper")
 
     # -------------------------
     # Main control loop
@@ -516,7 +580,8 @@ class MainLogic(Node):
                 self._publish_selected_target(target)
             else:
                 self.get_logger().info(
-                    f"[TARGET] not publishing /selected_target while state={self.state}; stored only"
+                    f"[TARGET] not publishing /selected_target while state={self.state}, "
+                    f"dialogue_state={self._dialogue_state}; stored only"
                 )
             return target
 
@@ -528,7 +593,8 @@ class MainLogic(Node):
                 self._publish_selected_target(gv.currentTargetGlobal)
             else:
                 self.get_logger().info(
-                    f"[TARGET] not publishing /selected_target while state={self.state}; stored fallback only"
+                    f"[TARGET] not publishing /selected_target while state={self.state}, "
+                    f"dialogue_state={self._dialogue_state}; stored fallback only"
                 )
             return gv.currentTargetGlobal
 
@@ -646,24 +712,97 @@ class MainLogic(Node):
         else:
             self._set_state("ready" if self._arm_armed else "initializing")
 
+    def _clear_pending_target_after_abort(self) -> None:
+        had_pending = self._pending_target is not None or self._pending_target_confirmed
+        self._pending_target = None
+        self._pending_target_confirmed = False
+        self._pre_move_gesture_running = False
+        self._dialogue_state = DIALOGUE_WAIT_SELECT
+        gv.currentTargetGlobal = None
+        if had_pending:
+            self.get_logger().info("[ABORT] cleared pending target/confirmation state")
+
+    def _cancel_abort_auto_ready_timer(self) -> None:
+        timer = self._abort_auto_ready_timer
+        if timer is None:
+            return
+        self._abort_auto_ready_timer = None
+        try:
+            timer.cancel()
+        except Exception:
+            pass
+        try:
+            self.destroy_timer(timer)
+        except Exception:
+            pass
+
+    def _schedule_abort_auto_ready(self) -> None:
+        self._cancel_abort_auto_ready_timer()
+        self._abort_auto_ready_timer = self.create_timer(
+            self._abort_auto_ready_delay_s,
+            self._on_abort_auto_ready_timer,
+            callback_group=self.cb_group,
+        )
+
+    def _on_abort_auto_ready_timer(self) -> None:
+        with self._state_lock:
+            if self.state == "aborted":
+                self._resume_state_after_abort = None
+                self._suspended_deadline_remaining = None
+                self._state_deadline = None
+                next_state = "ready" if self._arm_armed else "initializing"
+                self._set_state(next_state)
+                if next_state == "ready":
+                    self.get_logger().info("[GATE] abort complete -> state=ready (waiting for new select)")
+                else:
+                    self.get_logger().info(
+                        "[GATE] abort complete -> state=initializing (waiting for arm ready + new select)"
+                    )
+        self._cancel_abort_auto_ready_timer()
+
     def _publish_pending_target_if_ready(self) -> None:
         if self._pending_target is None:
+            self._dialogue_state = DIALOGUE_WAIT_SELECT
             return
         if not self._pending_target_confirmed:
+            self._dialogue_state = DIALOGUE_WAIT_CONFIRM
             self.get_logger().info(
                 f"[TARGET] pending target retained ({self._pending_target}); waiting for 'where are you going'"
             )
             return
         if self.state != "ready":
+            self._dialogue_state = DIALOGUE_WAIT_DISPATCH
             self.get_logger().info(
-                f"[TARGET] pending target retained ({self._pending_target}); state={self.state}"
+                f"[TARGET] pending target retained ({self._pending_target}); "
+                f"state={self.state}, dialogue_state={self._dialogue_state}"
             )
             return
         target = self._pending_target
         self._pending_target = None
         self._pending_target_confirmed = False
+        self._dialogue_state = DIALOGUE_WAIT_SELECT
         self._publish_selected_target(target)
         self.get_logger().info(f"[TARGET] dispatched pending target: {target}")
+
+    def _normalize_voice_text(self, text: str) -> str:
+        text = (text or "").lower()
+        text = re.sub(r"[^a-z0-9\s]+", " ", text)
+        return " ".join(text.split())
+
+    def _is_what_phrase(self, norm_cmd: str) -> bool:
+        return norm_cmd == "what" or norm_cmd == "what are you doing" or (
+            "what" in norm_cmd
+        )
+
+    def _is_confirm_phrase(self, norm_cmd: str) -> bool:
+        if norm_cmd in {"where", "confirm"} or "where" in norm_cmd:
+            return True
+        return norm_cmd in {
+            "where are you going",
+            "where will you go",
+            "where you going",
+            "where are we going",
+        }
 
 
 def main(args=None):
