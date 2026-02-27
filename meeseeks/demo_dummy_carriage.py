@@ -11,13 +11,12 @@ class DummyCarriage(Node):
         state_qos = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
-            # /robot_control_state is a command/gating topic; VOLATILE avoids CLI QoS mismatch.
             durability=DurabilityPolicy.VOLATILE,
         )
         self.pub = self.create_publisher(Float64, "/elmo/id1/carriage/position/get", 10)
         self.create_subscription(String, "/robot_control_state", self._on_control_state, state_qos)
 
-        # Simple motion sim
+        # motion sim
         self.pos = 0.0
         self.vel = 0.06  # m per tick
         self.dt = 0.1    # seconds

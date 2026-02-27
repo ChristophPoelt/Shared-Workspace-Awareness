@@ -50,27 +50,25 @@ class RobotGestures(Node):
     def __init__(self):
         super().__init__("robot_gestures")
 
-        # --------------------------
         # Parameters
-        # --------------------------
         self.declare_parameter("backend", BackendMode.AUTO.value)
         self.declare_parameter("server_wait_s", 0.2)
         self.declare_parameter("follow_control_state", True)
 
-        # Action backend (real robot)
+        # Action backend 
         self.declare_parameter("gripper_action_name", "/robotiq_gripper_controller/gripper_cmd")
         self.declare_parameter("open_position", 0.0)
         self.declare_parameter("close_position", 0.8)
         self.declare_parameter("max_effort", 100.0)
 
-        # Arm trajectory publisher (real robot OR sim if controller exists)
+        # Arm trajectory publisher
         self.declare_parameter("arm_traj_topic", "/joint_trajectory_controller/joint_trajectory")
         self.declare_parameter("arm_move_s", 4.0)   # time for each A->B move
         self.declare_parameter("arm_settle_s", 0.2) # tiny settle between steps
         self.declare_parameter("wipe_joint6_amp", 0.6)
         self.declare_parameter("grab_joint3_amp", 0.25)
 
-        # Sim backend (topic)
+        # Sim backend
         self.declare_parameter("sim_gripper_topic", "/gripper_controller/commands")
 
         # Gesture timing
@@ -98,9 +96,7 @@ class RobotGestures(Node):
         self._wipe_joint6_amp = float(self.get_parameter("wipe_joint6_amp").value)
         self._grab_joint3_amp = float(self.get_parameter("grab_joint3_amp").value)
 
-        # --------------------------
         # State
-        # --------------------------
         self._lock = threading.Lock()
         self._busy: bool = False
         self._paused: bool = False
@@ -110,9 +106,7 @@ class RobotGestures(Node):
         self._latest_joint_state: Optional[JointState] = None
         self._joint_state_cv = threading.Condition()
 
-        # --------------------------
         # Gripper interfaces
-        # --------------------------
         self._gripper_client = ActionClient(self, GripperCommand, self._action_name)
 
         # Match gripper controller subscriber QoS (RELIABLE + VOLATILE).
@@ -130,9 +124,7 @@ class RobotGestures(Node):
         self._arm_pub = self.create_publisher(JointTrajectory, self._arm_traj_topic, qos)
         self.get_logger().info(f"[GESTURE] arm traj topic: {self._arm_traj_topic} (move_s={self._arm_move_s})")
 
-        # --------------------------
         # Services
-        # --------------------------
         self.create_service(Trigger, "/gesture/target_selected", self._on_target_selected)
         self.create_service(
             Trigger, "/gesture/target_selected_blocking", self._on_target_selected_blocking
@@ -150,9 +142,7 @@ class RobotGestures(Node):
         self.create_service(Trigger, "/gesture/target_reached", self._on_target_reached)
         self.create_service(Trigger, "/gesture/target_reached_blocking", self._on_target_reached_blocking)
 
-        # --------------------------
         # Log startup
-        # --------------------------
         self.get_logger().info(
             f"[INIT] node={self.get_name()} pid={os.getpid()} RobotGestures ready"
         )
@@ -167,9 +157,7 @@ class RobotGestures(Node):
             "it consumes services and optionally follows /robot_control_state"
         )
 
-    # --------------------------
     # Backend selection
-    # --------------------------
     def _select_backend(self) -> BackendMode:
         """
         Returns ACTION or SIM based on backend mode + action server availability.
@@ -234,9 +222,7 @@ class RobotGestures(Node):
                 self._joint_state_cv.wait(timeout=remaining)
             return self._latest_joint_state
 
-    # --------------------------
     # Services
-    # --------------------------
     def _begin_target_selected_sequence(self):
         with self._lock:
             if self._busy:
@@ -323,9 +309,7 @@ class RobotGestures(Node):
         response.message = msg
         return response
 
-    # --------------------------
     # Gesture runner
-    # --------------------------
     def _run_target_selected_sequence(self):
         """
         CLOSE -> OPEN -> CLOSE -> OPEN with pauses.
@@ -575,9 +559,7 @@ class RobotGestures(Node):
                 self._paused = False
                 self._abort_requested = False
 
-    # --------------------------
     # Wipe services
-    # --------------------------
     def _on_target_reached(self, request, response):
         self.get_logger().info("[GESTURE] service hit: /gesture/target_reached")
         ok, msg = self._begin_sequence("target_reached")
@@ -645,9 +627,7 @@ class RobotGestures(Node):
         response.message = msg2
         return response
 
-    # --------------------------
     # Grab services
-    # --------------------------
     def _on_grab(self, request, response):
         self.get_logger().info("[GESTURE] service hit: /gesture/grab")
         ok, msg = self._begin_sequence("grab")
@@ -690,9 +670,7 @@ class RobotGestures(Node):
         response.message = msg2
         return response
 
-    # --------------------------
     # Sending gripper commands
-    # --------------------------
     def _send_gripper_no_wait(self, position: float) -> None:
         backend = self._select_backend()
         self.get_logger().info(f"[GESTURE] backend={backend.value}, pos={position}")
@@ -723,7 +701,7 @@ class RobotGestures(Node):
 
         # SIM
         msg = Float64MultiArray()
-        msg.data = [float(position)]  # publish real values; sim will clamp if needed
+        msg.data = [float(position)]  
         self._sim_pub.publish(msg)
 
         subs = self._sim_pub.get_subscription_count()
@@ -760,9 +738,7 @@ class RobotGestures(Node):
         except Exception as e:
             return False, f"Abort: cancel failed: {e}"
 
-    # --------------------------
     # Pause / abort helpers
-    # --------------------------
     def _sleep_with_checks(self, seconds: float, check_dt: float = 0.05):
         """
         Sleeps for `seconds` while:

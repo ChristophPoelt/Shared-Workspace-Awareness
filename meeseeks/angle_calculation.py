@@ -40,12 +40,12 @@ class ClockwiseRail:
         """
         Interne Berechnung: Gibt (x, y, yaw) für eine normalisierte Distanz 'd' zurück.
         """
-        # --- 1. Segment: Obere Gerade (nach Rechts) ---
+        # 1. Segment: Obere Gerade (nach Rechts) ---
         if d < self.lx:
             return (self.r + d), 0.0, 0.0  # Yaw 0 = Rechts
         d -= self.lx
 
-        # --- 2. Segment: Kurve Oben-Rechts (Rechts -> Unten) ---
+        # 2. Segment: Kurve Oben-Rechts (Rechts -> Unten) ---
         if d < self.len_corner:
             theta = d / self.r
             cx = self.r + self.lx
@@ -53,12 +53,12 @@ class ClockwiseRail:
             return (cx + self.r * math.sin(theta)), (cy - self.r * math.cos(theta)), theta
         d -= self.len_corner
 
-        # --- 3. Segment: Rechte Gerade (nach Unten) ---
+        # 3. Segment: Rechte Gerade (nach Unten) ---
         if d < self.ly:
             return (self.r + self.lx + self.r), (self.r + d), (math.pi / 2)
         d -= self.ly
 
-        # --- 4. Segment: Kurve Unten-Rechts (Unten -> Links) ---
+        # 4. Segment: Kurve Unten-Rechts (Unten -> Links) ---
         if d < self.len_corner:
             theta = d / self.r
             cx = self.r + self.lx
@@ -66,12 +66,12 @@ class ClockwiseRail:
             return (cx + self.r * math.cos(theta)), (cy + self.r * math.sin(theta)), ((math.pi / 2) + theta)
         d -= self.len_corner
 
-        # --- 5. Segment: Untere Gerade (nach Links) ---
+        # 5. Segment: Untere Gerade (nach Links) ---
         if d < self.lx:
             return ((self.r + self.lx) - d), (self.r + self.ly + self.r), math.pi
         d -= self.lx
 
-        # --- 6. Segment: Kurve Unten-Links (Links -> Oben) ---
+        # 6. Segment: Kurve Unten-Links (Links -> Oben) ---
         if d < self.len_corner:
             theta = d / self.r
             cx = self.r
@@ -79,12 +79,12 @@ class ClockwiseRail:
             return (cx - self.r * math.sin(theta)), (cy + self.r * math.cos(theta)), (math.pi + theta)
         d -= self.len_corner
 
-        # --- 7. Segment: Linke Gerade (nach Oben) ---
+        # 7. Segment: Linke Gerade (nach Oben) ---
         if d < self.ly:
             return 0.0, ((self.r + self.ly) - d), (3 * math.pi / 2)
         d -= self.ly
 
-        # --- 8. Segment: Kurve Oben-Links (Oben -> Rechts) ---
+        # 8. Segment: Kurve Oben-Links (Oben -> Rechts) ---
         theta = d / self.r
         cx = self.r
         cy = self.r

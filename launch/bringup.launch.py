@@ -139,7 +139,7 @@ def generate_launch_description():
             default_value="false",
             description="Pointing-node standalone/demo override: treat missing /arm_armed as true after grace period",
         ),
-        # --- Always run gestures (so you can test them) ---
+
         Node(
             package="meeseeks",
             executable="robot_gestures",
@@ -154,7 +154,6 @@ def generate_launch_description():
             }],
         ),
 
-        # --- Robot initialization: both only (if needed) ---
         Node(
             package="meeseeks",
             executable="robot_initialization",
@@ -166,12 +165,11 @@ def generate_launch_description():
                 "max_move_duration_s": 12.0,
                 "fallback_move_duration_s": 8.0,
                 "joint_state_wait_timeout_s": 1.0,
-                # Keep main_logic as the canonical publisher for gating topics.
                 "publish_gating_topics": False,
             }],
         ),
 
-        # --- Spawn gripper controller in demo (delayed + retried to avoid controller_manager race) ---
+        # Spawn gripper controller in demo
         TimerAction(
             period=3.0,
             actions=[
@@ -180,7 +178,6 @@ def generate_launch_description():
             ],
         ),
 
-        # --- Always run your logic nodes ---
         TimerAction(
             period=6.5,
             actions=[
@@ -210,8 +207,5 @@ def generate_launch_description():
                 "demo_auto_armed": demo_auto_armed,
             }],
         ),
-        # Start adapter immediately in demo so action server is ready before logic triggers gestures.
         gripper_adapter,
-        # Transcriber is intentionally NOT launched here.
-        # Run it separately when needed, or use voice_cli_publisher for manual typed commands.
     ])

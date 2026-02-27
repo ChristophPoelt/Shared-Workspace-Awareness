@@ -20,7 +20,6 @@ from std_srvs.srv import Trigger
 
 from .angle_calculation import ClockwiseRail
 
-# Numeric positions for targets
 TARGET_POSITIONS = {
     "position0": 2.7,
     "position1": -2.5,
@@ -28,8 +27,8 @@ TARGET_POSITIONS = {
 }
 
 ARM_JOINT_NAMES = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
-FOLDED = [0.002, -0.8, -1.38, -0.06, -1.0, -1.55]  # full 6 joints, joint_1 overridden
-STRETCHED = [0.0, 0.5, -0.30, -0.0, -0.5, -1.55]  # full 6 joints, joint_1 overridden
+FOLDED = [0.002, -0.8, -1.38, -0.06, -1.0, -1.55]  # joint_1 overridden
+STRETCHED = [0.0, 0.5, -0.30, -0.0, -0.5, -1.55]  # joint_1 overridden
 
 
 def clamp(value: float, lo: float, hi: float) -> float:
@@ -425,14 +424,12 @@ class PointJoint1Node(Node):
         state_qos = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
-            # Command/gating topics should be easy to publish from CLI; no latching needed.
             durability=DurabilityPolicy.VOLATILE,
         )
         target_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
-            # Target selections are command events, so use VOLATILE instead of TRANSIENT_LOCAL.
             durability=DurabilityPolicy.VOLATILE,
         )
 
@@ -771,9 +768,7 @@ class PointJoint1Node(Node):
             self._bump_sequence_generation("arm disarmed")
             self._request_stop("arm disarmed")
 
-    # ----------------------
     # Callbacks
-    # ----------------------
     def _extract_arm_joint_positions(self, msg: JointState):
         name_to_index = {name: i for i, name in enumerate(msg.name)}
         missing = []
@@ -980,9 +975,7 @@ class PointJoint1Node(Node):
                 self.get_logger().info("[SEQUENCE] pointing sequence complete (no-op)")
                 progressed = False
 
-    # ----------------------
     # Core logic
-    # ----------------------
     def update_joint1(self):
         now = self.get_clock().now().nanoseconds * 1e-9
         self._consume_backend_outcome(now)

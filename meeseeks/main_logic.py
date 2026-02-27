@@ -166,14 +166,12 @@ class MainLogic(Node):
         state_qos = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
-            # Command topics are operator-driven and should not require latched/transient QoS.
             durability=DurabilityPolicy.VOLATILE,
         )
         target_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
-            # /selected_target is also a command-style topic; prefer CLI-friendly VOLATILE QoS.
             durability=DurabilityPolicy.VOLATILE,
         )
         self.target_pub = self.create_publisher(String, "/selected_target", target_qos)
@@ -216,7 +214,7 @@ class MainLogic(Node):
         self._publish_control_state()
         self._publish_arm_armed()
 
-        # Service client for robot initialization (Franzi)
+        # Service client for robot initialization
         self.robot_init_client = self.create_client(
             Trigger,
             "/robot/initialize",
@@ -275,7 +273,7 @@ class MainLogic(Node):
         self.get_logger().info("=" * 60)
         self.create_timer(5.0, self._warn_on_duplicate_node_names, callback_group=self.cb_group)
 
-        # ----- Init sequence -----
+        # Init sequence 
         self._initial_pose()
         self.get_logger().info(
             "Initialization requested. Waiting for arm arming and a 'select' voice command."
@@ -286,9 +284,7 @@ class MainLogic(Node):
             0.1, self.main_control_loop, callback_group=self.cb_group
         )
 
-    # -------------------------
     # Voice commands
-    # -------------------------
     def _on_voice_command(self, msg: String) -> None:
         raw = (msg.data or "").strip()
         cmd = raw.lower()
@@ -531,9 +527,7 @@ class MainLogic(Node):
             self.gesture.open_no_wait()
             self.get_logger().info("[VOICE] continue -> called /gesture/open to reopen gripper")
 
-    # -------------------------
     # Main control loop
-    # -------------------------
     def _on_carriage_position(self, msg: Float64) -> None:
         self.current_carriage_pos = msg.data
 
@@ -603,16 +597,14 @@ class MainLogic(Node):
             if self.state != "ready":
                 return
 
-    # -------------------------
-    # Helpers
-    # -------------------------
+    # Helper
     def _select_new_target_safe(self, initial: bool, publish_selected_target: bool = True):
         """Select a new target and optionally publish /selected_target."""
         try:
             prev = gv.currentTargetGlobal
             target = selectNewTarget(None if initial else prev)
 
-            # Force-update global, even if selectNewTarget() only returns a value
+            # Force-update global
             gv.currentTargetGlobal = target
             
             self.get_logger().info(f"[TARGET] selected target: {target}")
@@ -638,9 +630,7 @@ class MainLogic(Node):
                 )
             return gv.currentTargetGlobal
 
-    # -------------------------
-    # Robot init (Franzi)
-    # -------------------------
+    # Robot init 
     def _initial_pose(self) -> None:
         self.get_logger().info("[INIT] requesting /robot/initialize service...")
 

@@ -11,7 +11,6 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
-# Configuration
 SAMPLE_RATE = 16000        # Hz (Whisper native rate)
 CHUNK_DURATION = 2         # seconds per recording chunk
 LANGUAGE = "en"           # force English
@@ -40,10 +39,10 @@ def _load_voice_dependencies():
     # Silence noisy native-library stderr during import/model backend probing.
     devnull, old_stderr = _suppress_c_stderr()
     try:
-        import torch  # noqa: PLC0415
-        from silero_vad import get_speech_timestamps, load_silero_vad  # noqa: PLC0415
-        import whisper  # noqa: PLC0415
-        import sounddevice as sd  # noqa: PLC0415
+        import torch  
+        from silero_vad import get_speech_timestamps, load_silero_vad  
+        import whisper  
+        import sounddevice as sd 
     except Exception as exc:
         raise RuntimeError(
             "Failed to import transcriber voice dependencies. Activate the Python environment "
@@ -54,7 +53,6 @@ def _load_voice_dependencies():
     finally:
         _restore_c_stderr(devnull, old_stderr)
 
-    # Preserve previous behavior that preloads libgcc to avoid some PortAudio exit crashes.
     try:
         ctypes.CDLL("libgcc_s.so.1")
     except OSError:
@@ -301,7 +299,6 @@ def main(args=None):
             previous_handlers[signum] = signal.getsignal(signum)
             signal.signal(signum, _handle_signal)
         except Exception:
-            # Signal registration can fail in some embedded/non-main-thread contexts.
             continue
 
     try:

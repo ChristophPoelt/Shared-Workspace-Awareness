@@ -25,7 +25,7 @@ class GripperActionAdapter(Node):
     def __init__(self):
         super().__init__("gripper_action_adapter")
 
-        # Params (keep consistent with your real-robot interface)
+        # Params
         self.declare_parameter("cmd_topic", "/gripper_controller/commands")
         self.declare_parameter("min_pos", 0.0)
         self.declare_parameter("max_pos", 0.8)
@@ -36,7 +36,7 @@ class GripperActionAdapter(Node):
         cmd_topic = self.get_parameter("cmd_topic").get_parameter_value().string_value
         self._cmd_topic = cmd_topic
 
-        # QoS must be RELIABLE to match gripper_controller subscription
+        # QoS to match gripper_controller subscription
         qos = QoSProfile(depth=1)
         qos.reliability = ReliabilityPolicy.RELIABLE
         qos.durability = DurabilityPolicy.VOLATILE
@@ -133,14 +133,14 @@ class GripperActionAdapter(Node):
                 pos = max_pos
 
             msg = Float64MultiArray()
-            msg.data = [pos]  # single joint
+            msg.data = [pos] 
 
             self._pub.publish(msg)
             self.get_logger().info(
                 f"[ADAPTER] Published gripper pos {pos:.3f} to {self._cmd_topic}"
             )
 
-            # Short cancel-aware settle loop so clients get a completed action state.
+            # Short cancel-aware settle loop to allow gripper_controller to react and avoid immediately reporting success while still moving.
             if settle > 0.0:
                 end_t = time.monotonic() + settle
                 while time.monotonic() < end_t:

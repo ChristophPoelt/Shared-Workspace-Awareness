@@ -21,7 +21,7 @@ class EmergencyStop(Node):
     def __init__(self):
         super().__init__("emergency_stop")
 
-        # Publishers (match your CLI commands)
+        # Publishers to command arm stop and carriage/lift stop
         self.arm_pub = self.create_publisher(
             JointTrajectory,
             "/joint_trajectory_controller/joint_trajectory",
@@ -30,7 +30,7 @@ class EmergencyStop(Node):
         self.carriage_stop_pub = self.create_publisher(Empty, "/elmo/id2/carriage/stop", 10)
         self.lift_stop_pub = self.create_publisher(Empty, "/elmo/id2/lift/stop", 10)
 
-        # Joint state subscriber (to hold current position)
+        # Joint state subscriber
         self._last_joint_state = None
         self._js_lock = threading.Lock()
         self.create_subscription(JointState, "/joint_states", self._on_joint_state, 50)
