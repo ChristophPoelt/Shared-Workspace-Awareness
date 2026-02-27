@@ -28,3 +28,11 @@ dist/
 .venv/
 venv/
 env/
+
+# Python virtualenvs
+.venv/
+.venv_*/
+venv/
+.env/
+__pycache__/
+*.pyc
