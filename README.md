@@ -1,12 +1,12 @@
 # Shared-Workspace-Awareness
 
 ## Environment Setup for real robot
-export ROS_DOMAIN_ID=2
-echo $ROS_DOMAIN_ID
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+- export ROS_DOMAIN_ID=2
+- echo $ROS_DOMAIN_ID
+- export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
-ros2 launch kortex_bringup gen3.launch.py robot_ip:=10.163.18.198 dof:=6 vision:=true gripper:=robotiq_2f_85 launch_rviz:=true
-ros2 launch kinova_gen3_6dof_robotiq_2f_85_moveit_config robot.launch.py robot_ip:=10.163.18.198 use_fake_hardware:=false
+- ros2 launch kortex_bringup gen3.launch.py robot_ip:=10.163.18.198 dof:=6 vision:=true gripper:=robotiq_2f_85 launch_rviz:=true
+- ros2 launch kinova_gen3_6dof_robotiq_2f_85_moveit_config robot.launch.py robot_ip:=10.163.18.198 use_fake_hardware:=false
 
 ## Voice transcriber setup (one-time per Python environment)
 The `transcriber` is launched as a normal ROS 2 node
@@ -44,9 +44,10 @@ ros2 launch meeseeks bringup.launch.py demo:=false
 ### Demo simulation
 ros2 launch meeseeks bringup.launch.py demo:=true
 
+
 ---
 
-## Control pipeline (current architecture)
+## Control pipeline
 - `main_logic` is the canonical publisher for:
   - `/robot_control_state`
   - `/arm_armed`
@@ -55,9 +56,10 @@ ros2 launch meeseeks bringup.launch.py demo:=true
 - `robot_gestures` does not publish gating topics; it exposes gesture services and can optionally follow `/robot_control_state`.
 - `robot_initialization` provides `/robot/initialize`; it can optionally publish gating topics for standalone/demo-only initialization (`publish_gating_topics:=true`), but this is disabled by default to avoid competing with `main_logic`.
 
-All command/gating topics use CLI-friendly QoS (`RELIABLE + VOLATILE`, depth 1), so `ros2 topic pub` defaults should work without extra QoS flags.
+All command/gating topics use CLI-friendly QoS (`RELIABLE + VOLATILE`, depth 1)
 
 ---
+
 
 ### Optional debug check:
 ### Voice state control
